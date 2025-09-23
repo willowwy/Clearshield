@@ -3,4 +3,7 @@
 .csv
 eda
 .DS_Store
-.gitignore
+
+data/raw/
+data/processed/
+data/external/
