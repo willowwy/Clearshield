@@ -2,3 +2,5 @@
 .idea
 .csv
 eda
+.DS_Store
+.gitignore
