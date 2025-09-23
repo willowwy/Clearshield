@@ -1,0 +1,21 @@
+Account ID,Member ID,Account Type,Account Open Date,Member Age,Product ID,Post Date,Post Time,Amount,Action Type,Source Type,Transaction Description,Fraud Adjustment Indicator,Is_Fraud
+1981650619,108390021,General Membership,11/17/2000,47,0.0,6/1/2025,456,$10.38,Deposit,,Balance Forward,,False
+1981650619,108390021,General Membership,11/17/2000,47,7.0,6/1/2025,456,$1.60,Deposit,,Balance Forward,,False
+1981650619,108390021,General Membership,11/17/2000,47,0.0,6/30/2025,2339,$3.40,Withdrawal,Fee,Paper Stmt Fee,,False
+1981650619,108390021,General Membership,11/17/2000,47,7.0,6/30/2025,2339,$1.60,Withdrawal,Fee,Paper Stmt Fee,,False
+1981650619,108390021,General Membership,11/17/2000,47,7,7/25/2025,1647,$400.00,Deposit,Online Banking,Mobile Deposit,,False
+1981650619,108390021,General Membership,11/17/2000,47,7,7/25/2025,1714,"$1,000.00",Deposit,Online Banking,Mobile Deposit,,False
+1981650619,108390021,General Membership,11/17/2000,47,7,7/26/2025,553,"$1,000.00",Deposit,Online Banking,Mobile Deposit,,False
+1981650619,108390021,General Membership,11/17/2000,47,7,7/26/2025,559,"$1,000.00",Deposit,Online Banking,Mobile Deposit,,False
+1981650619,108390021,General Membership,11/17/2000,47,7,7/26/2025,603,"$1,000.00",Deposit,Online Banking,Mobile Deposit,,False
+1981650619,108390021,General Membership,11/17/2000,47,7,7/26/2025,611,"$1,000.00",Deposit,Online Banking,Mobile Deposit,,False
+1981650619,108390021,General Membership,11/17/2000,47,7,7/26/2025,929,"$2,900.00",Withdrawal,Cash,,,False
+1981650619,108390021,General Membership,11/17/2000,47,7,7/28/2025,943,"$2,100.00",Deposit,Check,,,False
+1981650619,108390021,General Membership,11/17/2000,47,7,7/28/2025,944,$275.00,Withdrawal,Cash,,,False
+1981650619,108390021,General Membership,11/17/2000,47,7,7/28/2025,1338,"$1,000.00",Withdrawal,,,7/26 MOB DEP ADJ - RTN PER FRAUD,True
+1981650619,108390021,General Membership,11/17/2000,47,7,7/28/2025,1344,"$1,000.00",Withdrawal,,,7/25 MOB DEP ADJ - RTN PER FRAUD,True
+1981650619,108390021,General Membership,11/17/2000,47,7,7/28/2025,1345,$400.00,Withdrawal,,,7/25 MOB DEP ADJ - RTN PER FRAUD,True
+1981650619,108390021,General Membership,11/17/2000,47,7,7/28/2025,1349,"$1,000.00",Withdrawal,,,7/26 MOB DEP ADJ - RTN PER FRAUD,True
+1981650619,108390021,General Membership,11/17/2000,47,7,7/28/2025,1349,"$1,000.00",Withdrawal,,,7/26 MOB DEP ADJ - RTN PER FRAUD,True
+1981650619,108390021,General Membership,11/17/2000,47,7,7/28/2025,1349,"$1,000.00",Withdrawal,,,7/26 MOB DEP ADJ - RTN PER FRAUD,True
+1981650619,108390021,General Membership,11/17/2000,47,7,7/31/2025,1233,"$2,100.00",Withdrawal,,,,False

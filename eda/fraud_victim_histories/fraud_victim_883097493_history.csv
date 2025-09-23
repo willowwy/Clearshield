@@ -1,0 +1,25 @@
+Account ID,Member ID,Account Type,Account Open Date,Member Age,Product ID,Post Date,Post Time,Amount,Action Type,Source Type,Transaction Description,Fraud Adjustment Indicator,Is_Fraud
+4162182067,883097493,General Membership,9/29/2022,31,0.0,3/24/2025,1626,$2.00,Deposit,Fee,LOW ACTIVITY REF,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,3/24/2025,1626,$2.00,Deposit,Fee,LOW ACTIVITY REF,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,3/24/2025,1626,$2.00,Deposit,Fee,LOW ACTIVITY REF,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,3/25/2025,951,$50.00,Deposit,Online Banking,Zelle ZACARY,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,3/25/2025,1645,$46.00,Withdrawal,Cash,,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,3/31/2025,2332,$2.00,Withdrawal,Fee,Low Activity Fee,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,4/22/2025,600,$25.00,Deposit,ACH,AMANDA VARGA,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,4/24/2025,1923,$23.00,Withdrawal,Online Banking,Zelle ERIKKA,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,4/30/2025,2358,$2.00,Withdrawal,Fee,Low Activity Fee,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,5/31/2025,2226,$3.00,Withdrawal,Fee,Low Activity Fee,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,6/30/2025,2342,$3.00,Withdrawal,Fee,Low Activity Fee,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,7/2/2025,556,$550.00,Deposit,Online Banking,Mobile Deposit,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,7/2/2025,600,$600.00,Deposit,Online Banking,Mobile Deposit,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,7/2/2025,602,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,7/2/2025,608,$505.00,Deposit,Online Banking,Mobile Deposit,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,7/2/2025,611,$550.00,Deposit,Online Banking,Mobile Deposit,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,7/2/2025,615,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,7/2/2025,957,"$2,992.00",Withdrawal,Cash,,,False
+4162182067,883097493,General Membership,9/29/2022,31,0.0,7/2/2025,1455,$600.00,Withdrawal,,,7/2 MOB DEP ADJ - RETURN PER FRAUD,True
+4162182067,883097493,General Membership,9/29/2022,31,0.0,7/2/2025,1455,$500.00,Withdrawal,,,7/2 MOB DEP ADJ - RETURN PER FRAUD,True
+4162182067,883097493,General Membership,9/29/2022,31,0.0,7/2/2025,1455,$500.00,Withdrawal,,,7/2 MOB DEP ADJ - RETURN PER FRAUD,True
+4162182067,883097493,General Membership,9/29/2022,31,0.0,7/2/2025,1455,$505.00,Withdrawal,,,7/2 MOB DEP ADJ - RETURN PER FRAUD,True
+4162182067,883097493,General Membership,9/29/2022,31,0.0,7/2/2025,1455,$550.00,Withdrawal,,,7/2 MOB DEP ADJ - RETURN PER FRAUD,True
+4162182067,883097493,General Membership,9/29/2022,31,0.0,7/2/2025,1455,$550.00,Withdrawal,,,7/2 MOB DEP ADJ - RETURN PER FRAUD,True

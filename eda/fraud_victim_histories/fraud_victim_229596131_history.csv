@@ -1,0 +1,27 @@
+Account ID,Member ID,Account Type,Account Open Date,Member Age,Product ID,Post Date,Post Time,Amount,Action Type,Source Type,Transaction Description,Fraud Adjustment Indicator,Is_Fraud
+7196612546,229596131,General Membership,5/8/2025,20,0.0,5/9/2025,759,$10.00,Deposit,,,,False
+7196612546,229596131,General Membership,5/8/2025,20,7.0,5/18/2025,12706,$19.95,Withdrawal,Signature,CASH APP*GOPUFF,,False
+7196612546,229596131,General Membership,5/8/2025,20,7.0,5/20/2025,600,$20.00,Deposit,ACH,Cash App,,False
+7196612546,229596131,General Membership,5/8/2025,20,7.0,5/21/2025,172306,$99.82,Deposit,POS,CASH APP*JONAE*CASH,,False
+7196612546,229596131,General Membership,5/8/2025,20,7.0,5/22/2025,93550,$60.64,Withdrawal,Signature,KAYA,,False
+7196612546,229596131,General Membership,5/8/2025,20,7.0,5/23/2025,41127,$1.40,Withdrawal,Signature,CPI*LAUREL FOODSYSTEMS,,False
+7196612546,229596131,General Membership,5/8/2025,20,7.0,5/27/2025,5306,$2.40,Withdrawal,Signature,CPI*LAUREL FOODSYSTEMS,,False
+7196612546,229596131,General Membership,5/8/2025,20,0.0,7/7/2025,1424,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+7196612546,229596131,General Membership,5/8/2025,20,0.0,7/7/2025,1428,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+7196612546,229596131,General Membership,5/8/2025,20,0.0,7/7/2025,1429,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+7196612546,229596131,General Membership,5/8/2025,20,0.0,7/7/2025,1439,"$2,000.00",Withdrawal,Online Banking,Transfer To 0007,,False
+7196612546,229596131,General Membership,5/8/2025,20,0.0,7/7/2025,1439,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+7196612546,229596131,General Membership,5/8/2025,20,0.0,7/7/2025,1456,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+7196612546,229596131,General Membership,5/8/2025,20,0.0,7/7/2025,1459,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+7196612546,229596131,General Membership,5/8/2025,20,0.0,7/7/2025,1500,"$1,000.00",Withdrawal,Online Banking,Transfer To 0007,,False
+7196612546,229596131,General Membership,5/8/2025,20,7.0,7/7/2025,221543,$100.00,Withdrawal,Signature,CASH APP*JONAE*ADD,,False
+7196612546,229596131,General Membership,5/8/2025,20,7.0,7/7/2025,231607,"$1,400.00",Withdrawal,Signature,CASH APP*JONAE*ADD,,False
+7196612546,229596131,General Membership,5/8/2025,20,7.0,7/7/2025,231607,"$1,500.00",Withdrawal,Signature,CASH APP*JONAE*ADD,,False
+7196612546,229596131,General Membership,5/8/2025,20,0.0,7/8/2025,1510,$500.00,Withdrawal,,,7/7 MOB CK DEP RET PER FRAUD DEPT,True
+7196612546,229596131,General Membership,5/8/2025,20,0.0,7/8/2025,1513,$500.00,Withdrawal,,,7/7 MOB CK DEP RET PER FRAUD DEPT,True
+7196612546,229596131,General Membership,5/8/2025,20,0.0,7/8/2025,1513,$500.00,Withdrawal,,,7/7 MOB CK DEP RET PER FRAUD DEPT,True
+7196612546,229596131,General Membership,5/8/2025,20,0.0,7/8/2025,1513,$500.00,Withdrawal,,,7/7 MOB CK DEP RET PER FRAUD DEPT,True
+7196612546,229596131,General Membership,5/8/2025,20,0.0,7/8/2025,1514,$500.00,Withdrawal,,,7/7 MOB CK DEP RET PER FRAUD DEPT,True
+7196612546,229596131,General Membership,5/8/2025,20,0.0,7/8/2025,1514,$500.00,Withdrawal,,,7/7 MOB CK DEP RET PER FRAUD DEPT,True
+7196612546,229596131,General Membership,5/8/2025,20,0.0,7/10/2025,1255,$0.43,Deposit,,From Share 0007,,False
+7196612546,229596131,General Membership,5/8/2025,20,7.0,7/10/2025,1255,$0.43,Withdrawal,,To Share 0000,,False

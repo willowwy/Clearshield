@@ -1,0 +1,16 @@
+Account ID,Member ID,Account Type,Account Open Date,Member Age,Product ID,Post Date,Post Time,Amount,Action Type,Source Type,Transaction Description,Fraud Adjustment Indicator,Is_Fraud
+2521785831,642047142,General Membership,4/14/2025,24,0.0,6/1/2025,457,$10.00,Deposit,,Balance Forward,,False
+2521785831,642047142,General Membership,4/14/2025,24,0.0,6/28/2025,734,$600.00,Deposit,Online Banking,Mobile Deposit,,False
+2521785831,642047142,General Membership,4/14/2025,24,0.0,6/28/2025,739,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+2521785831,642047142,General Membership,4/14/2025,24,0.0,6/28/2025,744,$599.00,Deposit,Online Banking,Mobile Deposit,,False
+2521785831,642047142,General Membership,4/14/2025,24,0.0,6/28/2025,749,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+2521785831,642047142,General Membership,4/14/2025,24,0.0,6/28/2025,754,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+2521785831,642047142,General Membership,4/14/2025,24,0.0,6/28/2025,757,$510.00,Deposit,Online Banking,Mobile Deposit,,False
+2521785831,642047142,General Membership,4/14/2025,24,0.0,6/28/2025,1147,"$2,500.00",Withdrawal,Cash,,,False
+2521785831,642047142,General Membership,4/14/2025,24,0.0,6/28/2025,1154,$500.00,Withdrawal,Cash,,,False
+2521785831,642047142,General Membership,4/14/2025,24,0.0,6/30/2025,1228,$500.00,Withdrawal,,,6/28 MOB DEP RETURN FRAUD,True
+2521785831,642047142,General Membership,4/14/2025,24,0.0,6/30/2025,1228,$500.00,Withdrawal,,,6/28 MOB DEP RETURN FRAUD,True
+2521785831,642047142,General Membership,4/14/2025,24,0.0,6/30/2025,1228,$600.00,Withdrawal,,,6/28 MOB DEP RETURN FRAUD,True
+2521785831,642047142,General Membership,4/14/2025,24,0.0,6/30/2025,1229,$599.00,Withdrawal,,,6/28 MOB DEP RETURN FRAUD,True
+2521785831,642047142,General Membership,4/14/2025,24,0.0,6/30/2025,1230,$510.00,Withdrawal,,,6/28 MOB DEP RETURN FRAUD,True
+2521785831,642047142,General Membership,4/14/2025,24,0.0,6/30/2025,1230,$500.00,Withdrawal,,,6/28 MOB DEP RETURN FRAUD,True

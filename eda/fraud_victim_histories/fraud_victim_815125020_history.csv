@@ -1,0 +1,33 @@
+Account ID,Member ID,Account Type,Account Open Date,Member Age,Product ID,Post Date,Post Time,Amount,Action Type,Source Type,Transaction Description,Fraud Adjustment Indicator,Is_Fraud
+9506943058,815125020,General Membership,7/16/2024,24,0000,9/30/2024,11,$0.05,Deposit,Dividend,Paid,,False
+9506943058,815125020,General Membership,7/16/2024,24,0007,9/30/2024,2338,$3.00,Withdrawal,Fee,Simple Chk Fee,,False
+9506943058,815125020,General Membership,7/16/2024,24,0007,10/31/2024,2341,$3.00,Withdrawal,Fee,Simple Chk Fee,,False
+9506943058,815125020,General Membership,7/16/2024,24,0007,11/30/2024,2335,$3.00,Withdrawal,Fee,Simple Chk Fee,,False
+9506943058,815125020,General Membership,7/16/2024,24,0007,12/6/2024,1445,$38.00,Withdrawal,Online Banking,Zelle EUGENE,,False
+9506943058,815125020,General Membership,7/16/2024,24,0000,12/6/2024,1445,$35.00,Withdrawal,Online Banking,Zelle EUGENE,,False
+9506943058,815125020,General Membership,7/16/2024,24,0000,12/12/2024,1031,$15.00,Withdrawal,Online Banking,Zelle EUGENE,,False
+9506943058,815125020,General Membership,7/16/2024,24,0007,12/31/2024,2351,$0.01,Withdrawal,Fee,Simple Chk Fee,,False
+9506943058,815125020,General Membership,7/16/2024,24,0000,1/31/2025,13,$2.00,Withdrawal,Fee,Low Activity Fee,,False
+9506943058,815125020,General Membership,7/16/2024,24,0.0,2/28/2025,2343,$2.00,Withdrawal,Fee,Low Activity Fee,,False
+9506943058,815125020,General Membership,7/16/2024,24,0.0,3/31/2025,2332,$2.00,Withdrawal,Fee,Low Activity Fee,,False
+9506943058,815125020,General Membership,7/16/2024,24,0.0,4/30/2025,2358,$2.00,Withdrawal,Fee,Low Activity Fee,,False
+9506943058,815125020,General Membership,7/16/2024,24,1.0,5/15/2025,1422,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+9506943058,815125020,General Membership,7/16/2024,24,1.0,5/15/2025,1430,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+9506943058,815125020,General Membership,7/16/2024,24,1.0,5/15/2025,1435,$600.00,Deposit,Online Banking,Mobile Deposit,,False
+9506943058,815125020,General Membership,7/16/2024,24,1.0,5/15/2025,1441,$700.00,Deposit,Online Banking,Mobile Deposit,,False
+9506943058,815125020,General Membership,7/16/2024,24,1.0,5/15/2025,1449,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+9506943058,815125020,General Membership,7/16/2024,24,1.0,5/15/2025,1455,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+9506943058,815125020,General Membership,7/16/2024,24,1.0,5/15/2025,1501,"$3,000.00",Withdrawal,Online Banking,Transfer To 0007,,False
+9506943058,815125020,General Membership,7/16/2024,24,7.0,5/15/2025,181721,$689.50,Deposit,POS,APPLE CASH INST XFER,,False
+9506943058,815125020,General Membership,7/16/2024,24,7.0,5/15/2025,182229,$404.00,Withdrawal,ATM,600 EAST OHIO ST,,False
+9506943058,815125020,General Membership,7/16/2024,24,1.0,5/16/2025,909,$700.00,Withdrawal,,,5/15 MOB ADJ CK #19637 RET PER FRAUD,True
+9506943058,815125020,General Membership,7/16/2024,24,1.0,5/16/2025,910,$500.00,Withdrawal,,,5/15 MOB ADJ CK #19638 RET PER FRAUD,True
+9506943058,815125020,General Membership,7/16/2024,24,1.0,5/16/2025,911,$600.00,Withdrawal,,,5/15 MOB ADJ CK #19639 RET PER FRAUD,True
+9506943058,815125020,General Membership,7/16/2024,24,1.0,5/16/2025,912,$500.00,Withdrawal,,,5/15 MOB ADJ CK #19640 RET PER FRAUD,True
+9506943058,815125020,General Membership,7/16/2024,24,1.0,5/16/2025,913,$500.00,Withdrawal,,,5/15 MOB ADJ CK #19641 RET PER FRAUD,True
+9506943058,815125020,General Membership,7/16/2024,24,1.0,5/16/2025,914,$500.00,Withdrawal,,,5/15 MOB ADJ CK #19642 RET PER FRAUD,True
+9506943058,815125020,General Membership,7/16/2024,24,7.0,5/16/2025,101656,"$2,500.00",Withdrawal,Signature,APPLE CASH BALANCE ADD,,False
+9506943058,815125020,General Membership,7/16/2024,24,7.0,5/16/2025,105104,$282.00,Withdrawal,Signature,APPLE CASH BALANCE ADD,,False
+9506943058,815125020,General Membership,7/16/2024,24,7.0,5/16/2025,105934,$500.00,Withdrawal,Signature,APPLE CASH BALANCE ADD,,False
+9506943058,815125020,General Membership,7/16/2024,24,1.0,6/30/2025,1124,$2.05,Deposit,,From Share 0000,,False
+9506943058,815125020,General Membership,7/16/2024,24,0.0,6/30/2025,1124,$2.05,Withdrawal,,To Share 0001,,False

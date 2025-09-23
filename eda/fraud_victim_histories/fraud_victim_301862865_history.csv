@@ -1,0 +1,38 @@
+Account ID,Member ID,Account Type,Account Open Date,Member Age,Product ID,Post Date,Post Time,Amount,Action Type,Source Type,Transaction Description,Fraud Adjustment Indicator,Is_Fraud
+5259087224,301862865,General Membership,6/20/2025,24,0.0,6/20/2025,1059,$10.00,Deposit,Cash,,,False
+5259087224,301862865,General Membership,6/20/2025,24,7.0,7/8/2025,939,$142.00,Deposit,Online Banking,Zelle JUDITH,,False
+5259087224,301862865,General Membership,6/20/2025,24,7.0,7/8/2025,231643,$142.00,Withdrawal,Signature,CASH APP*HILARY,,False
+5259087224,301862865,General Membership,6/20/2025,24,7.0,7/10/2025,600,$268.01,Deposit,ACH,0482-5C53,,False
+5259087224,301862865,General Membership,6/20/2025,24,7.0,7/10/2025,600,$230.00,Deposit,ACH,87B0-9F51,,False
+5259087224,301862865,General Membership,6/20/2025,24,7.0,7/10/2025,101619,$498.00,Withdrawal,Signature,CASH APP*HILARY,,False
+5259087224,301862865,General Membership,6/20/2025,24,7,7/20/2025,902,$185.00,Deposit,Online Banking,Zelle JUDITH,,False
+5259087224,301862865,General Membership,6/20/2025,24,7,7/20/2025,231252,$185.00,Withdrawal,Signature,CASH APP*HILARY,,False
+5259087224,301862865,General Membership,6/20/2025,24,7,7/25/2025,853,$70.00,Deposit,Online Banking,Zelle JUDITH,,False
+5259087224,301862865,General Membership,6/20/2025,24,7,7/26/2025,857,$70.00,Withdrawal,Signature,CASH APP*HILARY,,False
+5259087224,301862865,General Membership,6/20/2025,24,7,7/27/2025,715,$23.19,Deposit,Online Banking,Mobile Deposit,,False
+5259087224,301862865,General Membership,6/20/2025,24,7,7/27/2025,230050,$23.19,Withdrawal,Signature,CASH APP*HILARY,,False
+5259087224,301862865,General Membership,6/20/2025,24,7,8/4/2025,1057,$15.00,Deposit,Online Banking,Zelle JUDITH,,False
+5259087224,301862865,General Membership,6/20/2025,24,7,8/4/2025,223708,$15.00,Withdrawal,Signature,CASH APP*DESTINIE,,False
+5259087224,301862865,General Membership,6/20/2025,24,0,8/5/2025,1745,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+5259087224,301862865,General Membership,6/20/2025,24,0,8/5/2025,1754,$500.00,Withdrawal,Online Banking,Transfer To 0007,,False
+5259087224,301862865,General Membership,6/20/2025,24,0,8/5/2025,1831,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+5259087224,301862865,General Membership,6/20/2025,24,0,8/5/2025,1834,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+5259087224,301862865,General Membership,6/20/2025,24,0,8/5/2025,1836,"$1,000.00",Withdrawal,Online Banking,Transfer To 0007,,False
+5259087224,301862865,General Membership,6/20/2025,24,0,8/5/2025,2007,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+5259087224,301862865,General Membership,6/20/2025,24,0,8/5/2025,2008,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+5259087224,301862865,General Membership,6/20/2025,24,0,8/5/2025,2010,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+5259087224,301862865,General Membership,6/20/2025,24,0,8/5/2025,2250,"$1,500.00",Withdrawal,Online Banking,Transfer To 0007,,False
+5259087224,301862865,General Membership,6/20/2025,24,7,8/5/2025,235746,$500.00,Withdrawal,Signature,CASH APP*A,,False
+5259087224,301862865,General Membership,6/20/2025,24,0,8/6/2025,1010,$500.00,Withdrawal,,,8/5 MOB DEP ADJ - RETURN PER FRAUD,True
+5259087224,301862865,General Membership,6/20/2025,24,0,8/6/2025,1011,$500.00,Withdrawal,,,8/5 MOB DEP ADJ - RETURN PER FRAUD,True
+5259087224,301862865,General Membership,6/20/2025,24,0,8/6/2025,1012,$500.00,Withdrawal,,,8/5 MOB DEP ADJ - RETURN PER FRAUD,True
+5259087224,301862865,General Membership,6/20/2025,24,0,8/6/2025,1013,$500.00,Withdrawal,,,8/5 MOB DEP ADJ - RETURN PER FRAUD,True
+5259087224,301862865,General Membership,6/20/2025,24,0,8/6/2025,1013,$500.00,Withdrawal,,,8/5 MOB DEP ADJ - RETURN PER FRAUD,True
+5259087224,301862865,General Membership,6/20/2025,24,0,8/6/2025,1014,$500.00,Withdrawal,,,8/5 MOB DEP ADJ - RETURN PER FRAUD,True
+5259087224,301862865,General Membership,6/20/2025,24,7,8/6/2025,24442,$500.00,Withdrawal,Signature,CASH APP*DESTINIE,,False
+5259087224,301862865,General Membership,6/20/2025,24,7,8/6/2025,31249,$500.00,Withdrawal,Signature,CASH APP*DESTINIE,,False
+5259087224,301862865,General Membership,6/20/2025,24,7,8/6/2025,63652,$500.00,Withdrawal,Signature,CASH APP*DESTINIE,,False
+5259087224,301862865,General Membership,6/20/2025,24,7,8/6/2025,64309,$500.00,Withdrawal,Signature,CASH APP*DESTINIE,,False
+5259087224,301862865,General Membership,6/20/2025,24,7,8/7/2025,111216,$500.00,Withdrawal,Signature,APPLE CASH SENT MONEY,,False
+5259087224,301862865,General Membership,6/20/2025,24,7,8/9/2025,1343,$0.01,Withdrawal,,To Share 0000,,False
+5259087224,301862865,General Membership,6/20/2025,24,0,8/9/2025,1343,$0.01,Deposit,,From Share 0007,,False

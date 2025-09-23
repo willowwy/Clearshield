@@ -1,0 +1,14 @@
+Account ID,Member ID,Account Type,Account Open Date,Member Age,Product ID,Post Date,Post Time,Amount,Action Type,Source Type,Transaction Description,Fraud Adjustment Indicator,Is_Fraud
+8753381085,862960764,General Membership,3/18/2025,38,0.0,3/18/2025,1546,$10.00,Deposit,Cash,,,False
+8753381085,862960764,General Membership,3/18/2025,38,7.0,3/19/2025,607,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+8753381085,862960764,General Membership,3/18/2025,38,7.0,3/19/2025,1811,$500.00,Deposit,Online Banking,Mobile Deposit,,False
+8753381085,862960764,General Membership,3/18/2025,38,7.0,3/19/2025,1817,$200.00,Withdrawal,Online Banking,Transfer To 0000,,False
+8753381085,862960764,General Membership,3/18/2025,38,0.0,3/19/2025,1822,$200.00,Withdrawal,Online Banking,Transfer To 0007,,False
+8753381085,862960764,General Membership,3/18/2025,38,7.0,3/19/2025,90813,$400.00,Withdrawal,ATM,SUNOCO   ADI-U,,False
+8753381085,862960764,General Membership,3/18/2025,38,7.0,3/19/2025,90906,$100.00,Withdrawal,ATM,SUNOCO   ADI-U,,False
+8753381085,862960764,General Membership,3/18/2025,38,7.0,3/20/2025,337,$54.72,Withdrawal,Online Banking,Zelle KHAIMERE,,False
+8753381085,862960764,General Membership,3/18/2025,38,7.0,3/20/2025,338,$55.24,Withdrawal,Online Banking,Zelle KHAIMERE,,False
+8753381085,862960764,General Membership,3/18/2025,38,7.0,3/20/2025,906,$500.00,Withdrawal,,,3/19 MOB RET PER FRAUD MAKER DID NOT SIGN,True
+8753381085,862960764,General Membership,3/18/2025,38,7.0,3/24/2025,944,$500.00,Withdrawal,,,,False
+8753381085,862960764,General Membership,3/18/2025,38,0.0,5/5/2025,1149,$10.00,Withdrawal,,To Share 0007,,False
+8753381085,862960764,General Membership,3/18/2025,38,7.0,5/5/2025,1149,$10.00,Deposit,,From Share 0000,,False

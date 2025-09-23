@@ -1,0 +1,33 @@
+Account ID,Member ID,Account Type,Account Open Date,Member Age,Product ID,Post Date,Post Time,Amount,Action Type,Source Type,Transaction Description,Fraud Adjustment Indicator,Is_Fraud
+7449692384,935766800,General Membership,6/29/1994,66,0025,9/30/2024,8,$0.11,Deposit,Dividend,Paid,,False
+7449692384,935766800,General Membership,6/29/1994,66,0009,9/30/2024,607,$12.88,Withdrawal,ACH,LOYAL 10,,False
+7449692384,935766800,General Membership,6/29/1994,66,0009,10/30/2024,615,$12.88,Withdrawal,ACH,LOYAL 10,,False
+7449692384,935766800,General Membership,6/29/1994,66,0025,10/31/2024,12,$0.12,Deposit,Dividend,Paid,,False
+7449692384,935766800,General Membership,6/29/1994,66,0009,11/29/2024,600,$12.88,Withdrawal,ACH,LOYAL 10,,False
+7449692384,935766800,General Membership,6/29/1994,66,0025,11/30/2024,5,$0.11,Deposit,Dividend,Paid,,False
+7449692384,935766800,General Membership,6/29/1994,66,0009,12/30/2024,631,$12.88,Withdrawal,ACH,LOYAL 10,,False
+7449692384,935766800,General Membership,6/29/1994,66,0025,12/31/2024,19,$0.11,Deposit,Dividend,Paid,,False
+7449692384,935766800,General Membership,6/29/1994,66,0009,1/29/2025,828,$12.88,Withdrawal,ACH,LOYAL 10,,False
+7449692384,935766800,General Membership,6/29/1994,66,0025,1/31/2025,38,$0.11,Deposit,Dividend,Paid,,False
+7449692384,935766800,General Membership,6/29/1994,66,25.0,2/28/2025,11,$0.10,Deposit,Dividend,Paid,,False
+7449692384,935766800,General Membership,6/29/1994,66,9.0,2/28/2025,600,$12.88,Withdrawal,ACH,LOYAL 10,,False
+7449692384,935766800,General Membership,6/29/1994,66,9.0,3/28/2025,600,$12.88,Withdrawal,ACH,LOYAL 10,,False
+7449692384,935766800,General Membership,6/29/1994,66,25.0,3/31/2025,11,$0.11,Deposit,Dividend,Paid,,False
+7449692384,935766800,General Membership,6/29/1994,66,25.0,4/30/2025,32,$0.10,Deposit,Dividend,Paid,,False
+7449692384,935766800,General Membership,6/29/1994,66,9.0,4/30/2025,600,$12.88,Withdrawal,ACH,LOYAL 10,,False
+7449692384,935766800,General Membership,6/29/1994,66,25.0,5/20/2025,719,"$2,424.00",Withdrawal,Online Banking,Transfer To 0009,,False
+7449692384,935766800,General Membership,6/29/1994,66,9.0,5/20/2025,1800,$0.34,Deposit,ACH,Self-Help,,False
+7449692384,935766800,General Membership,6/29/1994,66,9.0,5/20/2025,1800,$0.34,Deposit,ACH,Self-Help,,False
+7449692384,935766800,General Membership,6/29/1994,66,9.0,5/20/2025,1800,$0.09,Deposit,ACH,Self-Help,,False
+7449692384,935766800,General Membership,6/29/1994,66,9.0,5/20/2025,1810,$0.77,Withdrawal,ACH,Self-Help,,False
+7449692384,935766800,General Membership,6/29/1994,66,9.0,5/22/2025,1545,"$2,450.00",Withdrawal,ACH,Self-Help,,False
+7449692384,935766800,General Membership,6/29/1994,66,9.0,5/29/2025,600,$12.88,Withdrawal,ACH,LOYAL 10,,False
+7449692384,935766800,General Membership,6/29/1994,66,25.0,5/31/2025,2257,$0.07,Deposit,Dividend,Paid,,False
+7449692384,935766800,General Membership,6/29/1994,66,9.0,6/5/2025,1605,"$2,450.00",Deposit,,,5/22 SELF-HELP RETURN-UNAUTH TRANS,True
+7449692384,935766800,General Membership,6/29/1994,66,9.0,6/19/2025,458,"$2,430.00",Withdrawal,Online Banking,Transfer To 0025,,False
+7449692384,935766800,General Membership,6/29/1994,66,9.0,6/30/2025,1207,$12.88,Withdrawal,ACH,LOYAL 10,,False
+7449692384,935766800,General Membership,6/29/1994,66,25.0,6/30/2025,2313,$7.50,Withdrawal,Fee,MONEY MKT FEE,,False
+7449692384,935766800,General Membership,6/29/1994,66,9.0,7/18/2025,600,$40.15,Withdrawal,ACH,LOYAL AMERICAN I,,False
+7449692384,935766800,General Membership,6/29/1994,66,9,7/21/2025,600,$40.15,Withdrawal,ACH,GREAT AMERICAN L,,False
+7449692384,935766800,General Membership,6/29/1994,66,25,7/31/2025,18,$0.11,Deposit,Dividend,Paid,,False
+7449692384,935766800,General Membership,6/29/1994,66,25,8/31/2025,19,$0.11,Deposit,Dividend,Paid,,False
