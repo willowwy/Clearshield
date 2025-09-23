@@ -17,6 +17,9 @@ Clearshield/
 │   │   └── models/             # Model outputs
 │   └── external/               # External data sources
 │
+├── docs/
+│   ├── features_overview.md    # Features details breakdown
+│
 ├── src/
 │   ├── data/
 │   │   ├── __init__.py
@@ -26,6 +29,7 @@ Clearshield/
 │   │
 │   ├── features/
 │   │   ├── __init__.py
+│   │   ├── __main__.py
 │   │   ├── base_features.py    # Basic feature extraction
 │   │   ├── time_features.py    # Temporal features
 │   │   ├── amount_features.py  # Transaction amount features
