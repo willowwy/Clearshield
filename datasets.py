@@ -9,35 +9,39 @@ from scipy.stats import mstats
 
 def _discretize_amount(amount_series: pd.Series, n_bins: int = 12, percentile: float = 99.5) -> pd.Series:
     """
-    金额离散化策略：截尾 → 对数变换 → 等宽分箱
+    Amount discretization strategy: winsorization → log transformation → equal-width binning
     
     Args:
-        amount_series: 原始金额数据
-        n_bins: 分箱数量
-        percentile: 截尾百分位数
+        amount_series: Original amount data
+        n_bins: Number of bins
+        percentile: Winsorization percentile
     
     Returns:
-        离散化后的金额编码 (0 到 n_bins-1)
+        Discretized amount encoding (0 to n_bins-1)
     """
-    # 1. 截尾处理：按指定百分位数 winsorize
+    # 1. Winsorization: clip at specified percentile
     p995 = np.percentile(amount_series, percentile)
     amount_winsorized = np.minimum(amount_series, p995)
     
-    # 2. 对数变换：log1p 处理，避免 log(0) 问题
+    # 2. Log transformation: log1p to avoid log(0) issues
     amount_log = np.log1p(amount_winsorized)
     
-    # 3. 等宽分箱：在 log 空间上做等宽切分
-    # 找到 log 空间的最小值和最大值
+    # 3. Equal-width binning: split in log space
+    # Find min and max values in log space
     log_min = amount_log.min()
     log_max = amount_log.max()
     
-    # 创建等宽分箱边界
+    # Handle special case: if all values are the same, return 0
+    if log_min == log_max:
+        return pd.Series(0, index=amount_series.index, dtype=int)
+    
+    # Create equal-width bin edges
     bin_edges = np.linspace(log_min, log_max, n_bins + 1)
     
-    # 分箱：使用 pd.cut 进行离散化
-    amount_binned = pd.cut(amount_log, bins=bin_edges, labels=False, include_lowest=True)
+    # Binning: use pd.cut for discretization, handle duplicate boundaries
+    amount_binned = pd.cut(amount_log, bins=bin_edges, labels=False, include_lowest=True, duplicates='drop')
     
-    # 处理 NaN 值（边界情况）
+    # Handle NaN values (boundary cases)
     amount_binned = amount_binned.fillna(0).astype(int)
     
     return amount_binned
@@ -45,30 +49,30 @@ def _discretize_amount(amount_series: pd.Series, n_bins: int = 12, percentile: f
 
 def _quantize_account_age(account_age_days: pd.Series) -> pd.Series:
     """
-    账户年龄量子化：将账户年龄（天数）分为几个阶段
+    Account age quantization: divide account age (days) into several stages
     
     Args:
-        account_age_days: 账户年龄（天数）
+        account_age_days: Account age in days
     
     Returns:
-        量子化后的年龄编码 (0-4)
-        0: 1年以下 (< 365天)
-        1: 1-2年 (365-729天)
-        2: 3-5年 (730-1824天)
-        3: 5-10年 (1825-3650天)
-        4: 10年以上 (> 3650天)
+        Quantized age encoding (0-4)
+        0: Less than 1 year (< 365 days)
+        1: 1-2 years (365-729 days)
+        2: 3-5 years (730-1824 days)
+        3: 5-10 years (1825-3650 days)
+        4: More than 10 years (> 3650 days)
     """
     age_quantized = pd.Series(0, index=account_age_days.index, dtype=int)
     
-    # 1年以下
+    # Less than 1 year
     age_quantized[account_age_days < 365] = 0
-    # 1-2年
+    # 1-2 years
     age_quantized[(account_age_days >= 365) & (account_age_days < 730)] = 1
-    # 3-5年
+    # 3-5 years
     age_quantized[(account_age_days >= 730) & (account_age_days < 1825)] = 2
-    # 5-10年
+    # 5-10 years
     age_quantized[(account_age_days >= 1825) & (account_age_days < 3651)] = 3
-    # 10年以上
+    # More than 10 years
     age_quantized[account_age_days >= 3651] = 4
     
     return age_quantized
@@ -94,8 +98,8 @@ def _select_csv_files(matched_dir: str, mode: str, train_val_test: tuple[float, 
     n_test = n - n_train - n_val
 
     train_idx = indices[:n_train]
-    val_idx = indices[n_train:n_train + n_val]
-    test_idx = indices[n_train + n_val:]
+    val_idx = indices[n_train:n_train + n_test]
+    test_idx = indices[n_train + n_test:]
 
     if mode == "train":
         chosen = train_idx
@@ -110,7 +114,7 @@ def _select_csv_files(matched_dir: str, mode: str, train_val_test: tuple[float, 
 
 def _process_single_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
-    处理单个DataFrame的数据清洗和特征工程
+    Process single DataFrame for data cleaning and feature engineering
     """
     # Basic parsing
     if "Post Date" in df.columns:
@@ -129,7 +133,7 @@ def _process_single_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         df["Account Open Date"] = pd.to_datetime(df["Account Open Date"], errors="coerce")
         account_age = (df["Post Date"] - df["Account Open Date"]).dt.days
         df["account_age_days"] = account_age.fillna(0).astype(int)
-        # 添加量子化的账户年龄
+        # Add quantized account age
         df["account_age_quantized"] = _quantize_account_age(df["account_age_days"])
     else:
         df["account_age_days"] = 0
@@ -141,7 +145,7 @@ def _process_single_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         df["Fraud"] = 0
     df["Fraud"] = pd.to_numeric(df["Fraud"], errors="coerce").fillna(0).astype(int)
 
-    # Sort by available time keys (and id if存在)
+    # Sort by available time keys (and id if exists)
     sort_cols = [c for c in ["Account ID", "Post Date", "Post Time"] if c in df.columns]
     if sort_cols:
         df = df.sort_values(by=sort_cols)
@@ -151,8 +155,8 @@ def _process_single_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 def load_matched_dataframes(matched_dir: str = "matched", mode: str = "train", split: tuple[float, float, float] = (0.8, 0.1, 0.1), seed: int = 42) -> list[pd.DataFrame]:
     """
-    加载匹配的CSV文件，返回DataFrame列表而不是拼接的DataFrame
-    确保每个DataFrame对应一个CSV文件，保持数据的独立性
+    Load matched CSV files, return DataFrame list instead of concatenated DataFrame
+    Ensure each DataFrame corresponds to one CSV file, maintaining data independence
     """
     chosen_files = _select_csv_files(matched_dir, mode, split, seed)
     print(f"Loading {len(chosen_files)} files for {mode} mode")
@@ -248,7 +252,7 @@ def build_sequences_from_dataframe(df: pd.DataFrame):
                 amt = numeric.fillna(0)
                 processed[col] = _discretize_amount(amt )
             elif col == "account_age_days":
-                # 跳过account_age_days特征，不使用它
+                # Skip account_age_days feature, don't use it
                 continue
             else:
                 processed[col] = numeric
@@ -256,7 +260,7 @@ def build_sequences_from_dataframe(df: pd.DataFrame):
     X_df = pd.DataFrame(processed)
     X_df = X_df.fillna(0)
 
-    # 不进行归一化，直接使用原始值（后续会使用embedding层）
+    # No normalization, use raw values directly (embedding layers will be used later)
     X_scaled = X_df.values.astype(np.float32)
 
     sequences = []
@@ -276,26 +280,63 @@ def build_sequences_from_dataframe(df: pd.DataFrame):
 
 
 class FraudDataset(Dataset):
-    def __init__(self, sequences, max_len: int = 50):
+    def __init__(self, sequences, max_len: int = 50, use_sliding_window: bool = False, window_overlap: float = 0.5):
         """
         sequences: list of (X, y) tuples where each tuple represents sequences from a single CSV file
+        max_len: Maximum sequence length
+        use_sliding_window: Whether to use sliding window
+        window_overlap: Sliding window overlap ratio (0.0-0.9)
         """
         self.data = []
-        self.csv_file_indices = []  # 记录每个序列来自哪个CSV文件
+        self.csv_file_indices = []  # Record which CSV file each sequence comes from
+        self.max_len = max_len
+        self.use_sliding_window = use_sliding_window
+        self.window_overlap = window_overlap
         
         for csv_idx, (X, y) in enumerate(sequences):
-            if len(X) > max_len:
-                X, y = X[-max_len:], y[-max_len:]
-            pad_len = max_len - len(X)
-            # Pad at the beginning with zeros
-            X_pad = np.vstack([np.zeros((pad_len, X.shape[1]), dtype=np.float32), X.astype(np.float32)])
-            y_pad = np.hstack([np.zeros(pad_len, dtype=np.float32), y.astype(np.float32)])
-            # Mask: 0 for padding, 1 for valid steps
-            mask = np.hstack([np.zeros(pad_len, dtype=np.float32), np.ones(len(X), dtype=np.float32)])
-            self.data.append((torch.tensor(X_pad, dtype=torch.float32),
-                              torch.tensor(y_pad, dtype=torch.float32),
-                              torch.tensor(mask, dtype=torch.float32)))
-            self.csv_file_indices.append(csv_idx)
+            seq_len = len(X)
+            if seq_len <= 0:
+                continue
+
+            if self.use_sliding_window and seq_len > max_len:
+                # Sliding window strategy: overlapping sampling, significantly increase data volume
+                step_size = max(1, int(max_len * (1 - window_overlap)))
+                for start in range(0, seq_len - max_len + 1, step_size):
+                    end = start + max_len
+                    self._add_sequence(X[start:end], y[start:end], csv_idx)
+            else:
+                # Original strategy: non-overlapping segmentation
+                for start in range(0, seq_len, max_len):
+                    end = min(start + max_len, seq_len)
+                    X_seg = X[start:end]
+                    y_seg = y[start:end]
+                    self._add_sequence(X_seg, y_seg, csv_idx)
+
+    def _add_sequence(self, X_seg, y_seg, csv_idx):
+        """Add sequence to dataset"""
+        pad_len = self.max_len - len(X_seg)
+        
+        # Left zero padding to max_len
+        X_pad = np.vstack([
+            np.zeros((pad_len, X_seg.shape[1]), dtype=np.float32),
+            X_seg.astype(np.float32)
+        ])
+        y_pad = np.hstack([
+            np.zeros(pad_len, dtype=np.float32),
+            y_seg.astype(np.float32)
+        ])
+        # Mask: 0 for padding, 1 for valid steps
+        mask = np.hstack([
+            np.zeros(pad_len, dtype=np.float32),
+            np.ones(len(X_seg), dtype=np.float32)
+        ])
+
+        self.data.append((
+            torch.tensor(X_pad, dtype=torch.float32),
+            torch.tensor(y_pad, dtype=torch.float32),
+            torch.tensor(mask, dtype=torch.float32)
+        ))
+        self.csv_file_indices.append(csv_idx)
 
     def __len__(self):
         return len(self.data)
@@ -304,21 +345,22 @@ class FraudDataset(Dataset):
         return self.data[idx]
     
     def get_csv_file_indices(self):
-        """返回每个序列对应的CSV文件索引"""
+        """Return CSV file index for each sequence"""
         return self.csv_file_indices
 
 
 class CSVConsistentBatchSampler:
     """
-    自定义采样器，确保每个batch只包含来自同一个CSV文件的数据
+    Custom sampler to ensure each batch only contains data from the same CSV file
     """
-    def __init__(self, dataset, batch_size, shuffle=True):
+    def __init__(self, dataset, batch_size, shuffle=True, drop_all_zero_batches: bool = True):
         self.dataset = dataset
         self.batch_size = batch_size
         self.shuffle = shuffle
+        self.drop_all_zero_batches = drop_all_zero_batches
         self.csv_file_indices = dataset.get_csv_file_indices()
         
-        # 按CSV文件分组
+        # Group by CSV file
         self.csv_groups = {}
         for idx, csv_idx in enumerate(self.csv_file_indices):
             if csv_idx not in self.csv_groups:
@@ -326,14 +368,24 @@ class CSVConsistentBatchSampler:
             self.csv_groups[csv_idx].append(idx)
     
     def __iter__(self):
-        # 为每个CSV文件创建batch
+        # Create batches for each CSV file
         for csv_idx, indices in self.csv_groups.items():
             if self.shuffle:
                 np.random.shuffle(indices)
             
-            # 将同一CSV文件的序列分批
+            # Batch sequences from the same CSV file
             for i in range(0, len(indices), self.batch_size):
                 batch_indices = indices[i:i + self.batch_size]
+                if self.drop_all_zero_batches:
+                    # Filter out batches where y is all zeros (consider mask, only count valid steps)
+                    has_positive = False
+                    for di in batch_indices:
+                        _, y_t, mask_t = self.dataset[di]
+                        if ((y_t == 1) & (mask_t == 1)).any().item():
+                            has_positive = True
+                            break
+                    if not has_positive:
+                        continue
                 yield batch_indices
     
     def __len__(self):
@@ -344,24 +396,42 @@ class CSVConsistentBatchSampler:
 
 
 # Public API to build DataLoader from matched CSVs
-def create_dataloader(matched_dir: str = "matched", max_len: int = 50, batch_size: int = 32, shuffle: bool = True, mode: str = "train", split: tuple[float, float, float] = (0.8, 0.1, 0.1), seed: int = 42):
+def create_dataloader(matched_dir: str = "matched", max_len: int = 50, batch_size: int = 32, shuffle: bool = True, mode: str = "train", split: tuple[float, float, float] = (0.8, 0.1, 0.1), seed: int = 42, drop_all_zero_batches: bool = True, use_sliding_window: bool = False, window_overlap: float = 0.5):
     """
-    创建数据加载器，确保每个batch只包含来自同一个CSV文件的数据
+    Create data loader with sliding window support to enhance data utilization efficiency
+    
+    Args:
+        matched_dir: Data directory
+        max_len: Maximum sequence length
+        batch_size: Batch size
+        shuffle: Whether to shuffle data
+        mode: Data mode (train/val/test)
+        split: Data split ratios
+        seed: Random seed
+        drop_all_zero_batches: Whether to drop all-zero batches
+        use_sliding_window: Whether to use sliding window
+        window_overlap: Sliding window overlap ratio (0.0-0.9)
     """
     dataframes = load_matched_dataframes(matched_dir, mode=mode, split=split, seed=seed)
     
     all_sequences = []
     feature_names = None
     
-    # 为每个CSV文件构建序列
+    # Build sequences for each CSV file
     for df in dataframes:
         sequences, feature_names = build_sequences_from_dataframe(df)
         all_sequences.extend(sequences)
     
-    dataset = FraudDataset(all_sequences, max_len=max_len)
+    # Create dataset with sliding window support
+    dataset = FraudDataset(
+        all_sequences, 
+        max_len=max_len,
+        use_sliding_window=use_sliding_window and mode == "train",  # Only use sliding window during training
+        window_overlap=window_overlap
+    )
     
-    # 使用自定义采样器确保batch一致性
-    batch_sampler = CSVConsistentBatchSampler(dataset, batch_size=batch_size, shuffle=shuffle)
+    # Use custom sampler to ensure batch consistency and optionally drop all-zero label batches
+    batch_sampler = CSVConsistentBatchSampler(dataset, batch_size=batch_size, shuffle=shuffle, drop_all_zero_batches=drop_all_zero_batches)
     loader = DataLoader(dataset, batch_sampler=batch_sampler)
     
     return loader, feature_names
@@ -369,28 +439,59 @@ def create_dataloader(matched_dir: str = "matched", max_len: int = 50, batch_siz
 
 
 if __name__ == "__main__":
-    # Quick test example for creating datasets from matched CSVs
+    # Test sliding window functionality
+    print("=" * 80)
+    print("Test Sliding Window Functionality")
+    print("=" * 80)
+    
     try:
-        # 测试多文件模式
-        for mode in ["train", "val", "test"]:
-            print("---", mode, "---")
+        # Test different sliding window configurations
+        configs = [
+            {"use_sliding_window": False, "window_overlap": 0.0, "name": "Original Strategy"},
+            {"use_sliding_window": True, "window_overlap": 0.3, "name": "Sliding Window 30% Overlap"},
+            {"use_sliding_window": True, "window_overlap": 0.5, "name": "Sliding Window 50% Overlap"},
+            {"use_sliding_window": True, "window_overlap": 0.7, "name": "Sliding Window 70% Overlap"},
+        ]
+        
+        for config in configs:
+            print(f"\n--- {config['name']} ---")
             loader, feature_names = create_dataloader(
                 matched_dir="matched",
                 max_len=50,
                 batch_size=32,
-                shuffle=(mode == "train"),
-                mode=mode,
+                shuffle=True,
+                mode="train",
                 split=(0.8, 0.1, 0.1),
                 seed=42,
+                use_sliding_window=config["use_sliding_window"],
+                window_overlap=config["window_overlap"]
             )
-            print("Features:", feature_names)
-            print("Total batches:", len(loader))
             
-            # 检查前几个batch，验证batch一致性
+            print(f"Features: {len(feature_names)} features")
+            print(f"Total batches: {len(loader)}")
+            
+            # Statistics for label distribution
+            total_sequences = 0
+            total_y1_sequences = 0
+            
             for batch_idx, (X, y, mask) in enumerate(loader):
-                print("Batch", batch_idx, "X shape:", tuple(X.shape), "y shape:", tuple(y.shape), "mask shape:", tuple(mask.shape))
-                if batch_idx >= 2:  # 只检查前3个batch
+                if batch_idx >= 5:  # Only check first 5 batches
                     break
+                    
+                batch_size = X.shape[0]
+                total_sequences += batch_size
+                
+                # Use sequence-level label aggregation
+                valid_y = y * mask
+                seq_labels = (valid_y == 1).any(dim=1).float()
+                y1_count = (seq_labels == 1).sum().item()
+                total_y1_sequences += y1_count
+                
+                print(f"  Batch {batch_idx}: sequences={batch_size}, y==1 sequences={y1_count}")
+            
+            if total_sequences > 0:
+                fraud_rate = total_y1_sequences / total_sequences
+                print(f"  First 5 batches stats: total sequences={total_sequences}, y==1 sequences={total_y1_sequences}, fraud rate={fraud_rate:.4f}")
             
     except Exception as e:
         print("Failed to create dataloader:", e)
