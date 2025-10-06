@@ -72,9 +72,9 @@ class TimeCatLSTM(nn.Module):
 
     def forward(
         self,
-        x: torch.Tensor,             # [B, T, total_feature_dim] - 所有特征已经标准化
+        x: torch.Tensor,             # [B, T, total_feature_dim] - all features already prepared
         mask: torch.Tensor,          # [B, T]
-        feature_names: list,         # 特征名称列表，用于分离不同类型特征
+        feature_names: list,         # feature names list to split feature types
         use_pack: bool = True,
     ) -> torch.Tensor:
         # Separate different types of features from feature names

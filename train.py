@@ -16,6 +16,7 @@ import csv
 import json
 
 from model import TimeCatLSTM, build_arg_parser, build_model
+from losss import build_loss_from_args
 from datasets import create_dataloader
 
 
@@ -149,42 +150,42 @@ def evaluate(model, val_loader, criterion, device, feature_names):
         for X, y, mask in tqdm(val_loader, desc="Evaluating"):
             X, y, mask = X.to(device), y.to(device), mask.to(device)
             
-            # 前向传播
+            # Forward pass
             logits = model(X, mask, feature_names)
             
-            # 计算损失（使用与训练相同的逻辑）
+            # Compute loss (use the same logic as training)
             if mask.any():
-                # 使用序列中是否有任何欺诈事件（更符合欺诈检测场景）
-                valid_y = y * mask  # 只考虑有效时间步
-                seq_labels = (valid_y == 1).any(dim=1).float()  # 序列中是否有欺诈
+                # Use whether there are any fraud events in the sequence (suitable for fraud detection)
+                valid_y = y * mask  # consider only valid time steps
+                seq_labels = (valid_y == 1).any(dim=1).float()  # any fraud in sequence
                 
-                # 确保logits和labels的维度匹配
+                # Ensure logits and labels dimensions match
                 if logits.dim() == 1 and seq_labels.dim() == 1:
                     loss = criterion(logits, seq_labels)
                 else:
-                    # 如果维度不匹配，调整logits
+                    # If dimension mismatch, adjust logits
                     if logits.dim() == 1:
                         logits = logits.unsqueeze(0)
                     loss = criterion(logits, seq_labels.unsqueeze(0))
                 
                 total_loss += loss.item()
                 
-                # 收集预测和标签
+                # Collect predictions and labels
                 probs = torch.sigmoid(logits)
                 preds = probs > 0.5
                 all_preds.extend(preds.cpu().numpy())
                 all_labels.extend(seq_labels.cpu().numpy())
                 all_probs.extend(probs.cpu().numpy())
                 
-                # 统计y==1的预测情况
+                # Stats for y==1 samples
                 labels_np = seq_labels.cpu().numpy()
                 preds_np = preds.cpu().numpy()
                 
-                # 找到y==1的样本
+                # Find y==1 samples
                 y1_mask = labels_np == 1
                 y1_total += y1_mask.sum()
                 
-                # 统计y==1样本中的正确和错误预测
+                # Count correct and incorrect among y==1 samples
                 y1_correct += ((preds_np == 1) & y1_mask).sum()
                 y1_incorrect += ((preds_np == 0) & y1_mask).sum()
     
@@ -235,42 +236,42 @@ def test_model(model, test_loader, criterion, device, feature_names):
         for X, y, mask in tqdm(test_loader, desc="Testing"):
             X, y, mask = X.to(device), y.to(device), mask.to(device)
             
-            # 前向传播
+            # Forward pass
             logits = model(X, mask, feature_names)
             
-            # 计算损失（使用与训练相同的逻辑）
+            # Compute loss (use the same logic as training)
             if mask.any():
-                # 使用序列中是否有任何欺诈事件（更符合欺诈检测场景）
-                valid_y = y * mask  # 只考虑有效时间步
-                seq_labels = (valid_y == 1).any(dim=1).float()  # 序列中是否有欺诈
+                # Use whether there are any fraud events in the sequence (suitable for fraud detection)
+                valid_y = y * mask  # consider only valid time steps
+                seq_labels = (valid_y == 1).any(dim=1).float()  # any fraud in sequence
                 
-                # 确保logits和labels的维度匹配
+                # Ensure logits and labels dimensions match
                 if logits.dim() == 1 and seq_labels.dim() == 1:
                     loss = criterion(logits, seq_labels)
                 else:
-                    # 如果维度不匹配，调整logits
+                    # If dimension mismatch, adjust logits
                     if logits.dim() == 1:
                         logits = logits.unsqueeze(0)
                     loss = criterion(logits, seq_labels.unsqueeze(0))
                 
                 total_loss += loss.item()
                 
-                # 收集预测和标签
+                # Collect predictions and labels
                 probs = torch.sigmoid(logits)
                 preds = probs > 0.5
                 all_preds.extend(preds.cpu().numpy())
                 all_labels.extend(seq_labels.cpu().numpy())
                 all_probs.extend(probs.cpu().numpy())
                 
-                # 统计y==1的预测情况
+                # Stats for y==1 samples
                 labels_np = seq_labels.cpu().numpy()
                 preds_np = preds.cpu().numpy()
                 
-                # 找到y==1的样本
+                # Find y==1 samples
                 y1_mask = labels_np == 1
                 y1_total += y1_mask.sum()
                 
-                # 统计y==1样本中的正确和错误预测
+                # Count correct and incorrect among y==1 samples
                 y1_correct += ((preds_np == 1) & y1_mask).sum()
                 y1_incorrect += ((preds_np == 0) & y1_mask).sum()
     
@@ -418,7 +419,7 @@ def train_model(args):
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Loss function and optimizer
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = build_loss_from_args(args)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     
     # Learning rate scheduler
@@ -657,6 +658,14 @@ def main():
     parser.add_argument("--patience", type=int, default=5, help="Learning rate scheduler patience")
     parser.add_argument("--early_stopping_patience", type=int, default=10, help="Early stopping patience")
     
+    # Loss options
+    parser.add_argument("--loss_type", type=str, default="huber", choices=["bce", "huber", "pseudohuber", "quantile"], help="Choose loss function")
+    parser.add_argument("--delta", type=float, default=1.0, help="Huber/Pseudo-Huber delta (δ)")
+    parser.add_argument("--auto_delta_p", type=float, default=0.9, help="Auto delta: p-quantile of residual |e|, e.g., 0.9")
+    parser.add_argument("--quantiles", type=str, default="0.1,0.5,0.9", help="Quantile list, comma-separated")
+    parser.add_argument("--crossing_lambda", type=float, default=0.0, help="Anti-crossing regularization λ for quantile regression")
+    parser.add_argument("--apply_sigmoid_in_regression", action="store_true", default=True, help="Apply sigmoid to logits before regression-style losses")
+
     # Model saving
     parser.add_argument("--save_model", action="store_true", help="Whether to save model")
     parser.add_argument("--save_dir", type=str, default="checkpoints", help="Model save directory")
