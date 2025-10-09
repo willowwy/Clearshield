@@ -1,11 +1,11 @@
-# src/features/user_features.py
+# src/03_feature_engineering/user_features.py
 
 import pandas as pd
 
 
 def generate_user_features(transactions: pd.DataFrame) -> pd.DataFrame:
     """
-    Generate user-level features:
+    Generate user-level 03_feature_engineering:
     1. Age group (categorical: 18-30, 30-50, 50-65, 65+)
     2. Account Type (categorical: keep original account type values)
     """

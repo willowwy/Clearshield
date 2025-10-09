@@ -1,4 +1,4 @@
-# src/features/amount_features.py
+# src/03_feature_engineering/amount_features.py
 
 import pandas as pd
 import numpy as np
@@ -61,7 +61,7 @@ def _mark_bucket(amount: pd.Series, anchors=FRAUD_PRONE_BUCKETS, tol=AMOUNT_TOL)
 
 def generate_amount_features(transactions: pd.DataFrame) -> pd.DataFrame:
     """
-    Build transaction-level amount features.
+    Build transaction-level amount 03_feature_engineering.
     Output includes:
       - Member ID, TxnOrdinal, TxnTimestamp, AmountFloat
       - Fraud_Prone_Amount_Bucket

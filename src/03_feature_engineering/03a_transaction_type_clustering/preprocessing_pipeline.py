@@ -16,7 +16,7 @@ from sklearn.metrics import silhouette_score, davies_bouldin_score
 
 class TransactionPreprocessor:
     """
-    Complete preprocessing pipeline for transaction data
+    Complete transaction_type_clustering pipeline for transaction 01_data_cleaning
     Includes: cleaning, encoding, clustering (feature reduction)
     """
 
@@ -37,7 +37,7 @@ class TransactionPreprocessor:
 
     def fit(self, df, verbose=True):
         """
-        Fit the preprocessing pipeline on training data
+        Fit the transaction_type_clustering pipeline on training 01_data_cleaning
 
         Args:
             df: Training dataframe
@@ -49,7 +49,7 @@ class TransactionPreprocessor:
             print("=" * 60)
 
         # -----------------------------------------
-        # Step 1: Sample data for clustering
+        # Step 1: Sample 01_data_cleaning for clustering
         # -----------------------------------------
         if len(df) > self.sample_size:
             if verbose:
@@ -149,7 +149,7 @@ class TransactionPreprocessor:
 
     def transform(self, df, verbose=True):
         """
-        Transform data using fitted pipeline
+        Transform 01_data_cleaning using fitted pipeline
 
         Args:
             df: Dataframe to transform
@@ -172,7 +172,7 @@ class TransactionPreprocessor:
         for col in self.categorical_features:
             df_transformed[col] = df_transformed[col].fillna('Unknown')
 
-        # Encode features
+        # Encode 03_feature_engineering
         encoded_features = []
         for col in self.categorical_features:
             le = self.label_encoders[col]
@@ -187,7 +187,7 @@ class TransactionPreprocessor:
 
         X_encoded = np.column_stack(encoded_features)
 
-        # Scale features
+        # Scale 03_feature_engineering
         X_scaled = self.scaler.transform(X_encoded)
 
         # Predict clusters
@@ -204,7 +204,7 @@ class TransactionPreprocessor:
 
     def fit_transform(self, df, verbose=True):
         """
-        Fit pipeline and transform data in one step
+        Fit pipeline and transform 01_data_cleaning in one step
         """
         self.fit(df, verbose=verbose)
         return self.transform(df, verbose=verbose)
@@ -316,16 +316,16 @@ if __name__ == "__main__":
     print("=" * 60)
 
     # -----------------------------------------
-    # Step 1: Load raw data
+    # Step 1: Load raw 01_data_cleaning
     # -----------------------------------------
-    print("\n[STEP 1] Loading raw data...")
+    print("\n[STEP 1] Loading raw 01_data_cleaning...")
     df_raw = pd.read_csv("../../../data/processed/transaction_data_cleaned.csv")
     print(f"Loaded {len(df_raw):,} transactions")
 
     # -----------------------------------------
     # Step 2: Initialize and fit pipeline
     # -----------------------------------------
-    print("\n[STEP 2] Fitting preprocessing pipeline...")
+    print("\n[STEP 2] Fitting transaction_type_clustering pipeline...")
 
     preprocessor = TransactionPreprocessor(
         n_clusters=4,  # Adjust based on your analysis
@@ -336,15 +336,15 @@ if __name__ == "__main__":
     preprocessor.fit(df_raw)
 
     # -----------------------------------------
-    # Step 3: Transform all data
+    # Step 3: Transform all 01_data_cleaning
     # -----------------------------------------
-    print("\n[STEP 3] Transforming all data...")
+    print("\n[STEP 3] Transforming all 01_data_cleaning...")
     df_processed = preprocessor.transform(df_raw)
 
     # -----------------------------------------
-    # Step 4: Save processed data for LSTM
+    # Step 4: Save processed 01_data_cleaning for LSTM
     # -----------------------------------------
-    print("\n[STEP 4] Saving processed data...")
+    print("\n[STEP 4] Saving processed 01_data_cleaning...")
 
     output_path = "../../../data/processed/transaction_data_for_lstm.csv"
     df_processed.to_csv(output_path, index=False)
@@ -355,7 +355,7 @@ if __name__ == "__main__":
     # -----------------------------------------
     print("\n[STEP 5] Saving pipeline...")
 
-    pipeline_dir = "../../../models/preprocessing"
+    pipeline_dir = "../../../models/transaction_type_clustering"
     preprocessor.save(pipeline_dir)
 
     print("\n" + "=" * 60)

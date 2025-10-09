@@ -3,7 +3,7 @@
 from preprocessing_pipeline import TransactionPreprocessor
 import pandas as pd
 
-# Load data
+# Load 01_data_cleaning
 df = pd.read_csv("../../../data/processed/transaction_data_cleaned.csv")
 
 # Fit pipeline
@@ -14,6 +14,6 @@ df_processed = preprocessor.fit_transform(df)
 df_processed.to_csv("../../../data/processed/transaction_data_for_lstm.csv", index=False)
 
 # Save pipeline
-preprocessor.save("../../../models/preprocessing")
+preprocessor.save("../../../models/transaction_type_clustering")
 
 print("✓ Ready for LSTM training!")
