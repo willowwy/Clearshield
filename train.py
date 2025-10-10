@@ -51,12 +51,22 @@ def log_tensor_info(logger, tensor, name, batch_idx=None):
         logger.error(f"Error logging tensor info for {name}: {e}")
 
 
-def train_epoch(model, train_loader, optimizer, criterion, device, feature_names, logger):
+def _masked_regression_metrics(preds, target, valid_mask):
+    """Compute masked MSE/MAE given preds [B,T,D], target [B,T,D], valid_mask [B,T]."""
+    m = valid_mask.unsqueeze(-1).to(preds.dtype)
+    diff = (preds - target) * m
+    denom = m.sum().clamp_min(1.0)
+    mse = (diff ** 2).sum() / denom
+    mae = diff.abs().sum() / denom
+    return mse, mae
+
+
+def train_epoch(model, train_loader, optimizer, criterion, device, feature_names, target_indices, logger):
     """Train one epoch"""
     model.train()
-    total_loss = 0
-    all_preds = []
-    all_labels = []
+    total_loss = 0.0
+    total_mse = 0.0
+    total_mae = 0.0
     
     for batch_idx, (X, y, mask) in enumerate(tqdm(train_loader, desc="Training")):
         try:
@@ -72,45 +82,29 @@ def train_epoch(model, train_loader, optimizer, criterion, device, feature_names
             
             optimizer.zero_grad()
             
-            # Forward pass
-            logits = model(X, mask, feature_names)
+            # Forward pass to get sequence predictions [B,T,pred_dim]
+            preds = model(X, mask, feature_names)
             
             # Log model output info (only for first batch)
             if batch_idx == 0:
-                log_tensor_info(logger, logits, "Model Output Logits", batch_idx)
+                log_tensor_info(logger, preds, "Model Output Preds", batch_idx)
             
-            # Calculate loss (model output is one prediction per sequence)
-            # logits shape: [batch_size] - one prediction per sequence
-            # y shape: [batch_size, seq_len] - labels for each time step
-            # mask shape: [batch_size, seq_len] - validity for each time step
-            
-            # For sequence-level prediction, we need to aggregate labels
-            # Use mask to weight average labels, or use last valid label
+            # Next-step target (shift by one): use mask[:,1:] to select valid steps
             if mask.any():
-                # Use whether there are any fraud events in the sequence (more suitable for fraud detection)
-                # For fraud detection, we care about whether fraud occurred in the sequence, not the last step's label
-                valid_y = y * mask  # Only consider valid time steps
-                seq_labels = (valid_y == 1).any(dim=1).float()  # Whether there is fraud in the sequence
-                
-                # Ensure logits and labels dimensions match
-                if logits.dim() == 1 and seq_labels.dim() == 1:
-                    loss = criterion(logits, seq_labels)
-                else:
-                    # If dimensions don't match, adjust logits
-                    if logits.dim() == 1:
-                        logits = logits.unsqueeze(0)
-                    loss = criterion(logits, seq_labels.unsqueeze(0))
-                
+                pred_steps = preds[:, :-1, :]
+                # Select target columns by indices
+                target_steps = X[:, 1:, target_indices]
+                valid_steps = mask[:, 1:]
+
+                mse, mae = _masked_regression_metrics(pred_steps, target_steps, valid_steps)
+                loss = mse  # optimize MSE
+
                 loss.backward()
                 optimizer.step()
-                
+
                 total_loss += loss.item()
-                
-                # Collect predictions and labels for evaluation
-                with torch.no_grad():
-                    preds = torch.sigmoid(logits) > 0.5
-                    all_preds.extend(preds.cpu().numpy())
-                    all_labels.extend(seq_labels.cpu().numpy())
+                total_mse += mse.item()
+                total_mae += mae.item()
                     
         except Exception as e:
             logger.error(f"Error in batch {batch_idx}: {str(e)}")
@@ -128,107 +122,48 @@ def train_epoch(model, train_loader, optimizer, criterion, device, feature_names
             raise e  # Re-raise exception
     
     avg_loss = total_loss / len(train_loader)
-    accuracy = accuracy_score(all_labels, all_preds) if all_preds else 0
-    
-    return avg_loss, accuracy
+    avg_mse = total_mse / len(train_loader)
+    avg_mae = total_mae / len(train_loader)
+    return avg_loss, avg_mse, avg_mae
 
 
-def evaluate(model, val_loader, criterion, device, feature_names):
+def evaluate(model, val_loader, criterion, device, feature_names, target_indices):
     """Evaluate model"""
     model.eval()
-    total_loss = 0
-    all_preds = []
-    all_labels = []
-    all_probs = []
-    
-    # Statistics for y==1 predictions
-    y1_correct = 0  # y==1 and correctly predicted count
-    y1_incorrect = 0  # y==1 but incorrectly predicted count
-    y1_total = 0  # total y==1 count
+    total_loss = 0.0
+    total_mse = 0.0
+    total_mae = 0.0
     
     with torch.no_grad():
         for X, y, mask in tqdm(val_loader, desc="Evaluating"):
             X, y, mask = X.to(device), y.to(device), mask.to(device)
             
             # Forward pass
-            logits = model(X, mask, feature_names)
-            
-            # Compute loss (use the same logic as training)
+            preds = model(X, mask, feature_names)
+
             if mask.any():
-                # Use whether there are any fraud events in the sequence (suitable for fraud detection)
-                valid_y = y * mask  # consider only valid time steps
-                seq_labels = (valid_y == 1).any(dim=1).float()  # any fraud in sequence
-                
-                # Ensure logits and labels dimensions match
-                if logits.dim() == 1 and seq_labels.dim() == 1:
-                    loss = criterion(logits, seq_labels)
-                else:
-                    # If dimension mismatch, adjust logits
-                    if logits.dim() == 1:
-                        logits = logits.unsqueeze(0)
-                    loss = criterion(logits, seq_labels.unsqueeze(0))
-                
+                pred_steps = preds[:, :-1, :]
+                target_steps = X[:, 1:, target_indices]
+                valid_steps = mask[:, 1:]
+
+                mse, mae = _masked_regression_metrics(pred_steps, target_steps, valid_steps)
+                loss = mse
                 total_loss += loss.item()
-                
-                # Collect predictions and labels
-                probs = torch.sigmoid(logits)
-                preds = probs > 0.5
-                all_preds.extend(preds.cpu().numpy())
-                all_labels.extend(seq_labels.cpu().numpy())
-                all_probs.extend(probs.cpu().numpy())
-                
-                # Stats for y==1 samples
-                labels_np = seq_labels.cpu().numpy()
-                preds_np = preds.cpu().numpy()
-                
-                # Find y==1 samples
-                y1_mask = labels_np == 1
-                y1_total += y1_mask.sum()
-                
-                # Count correct and incorrect among y==1 samples
-                y1_correct += ((preds_np == 1) & y1_mask).sum()
-                y1_incorrect += ((preds_np == 0) & y1_mask).sum()
-    
+                total_mse += mse.item()
+                total_mae += mae.item()
+
     avg_loss = total_loss / len(val_loader)
-    accuracy = accuracy_score(all_labels, all_preds) if all_preds else 0
-    
-    # 计算其他指标
-    if all_preds:
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            all_labels, all_preds, average='binary', zero_division=0
-        )
-        try:
-            auc = roc_auc_score(all_labels, all_probs)
-        except ValueError:
-            auc = 0.0
-    else:
-        precision = recall = f1 = auc = 0.0
-    
-    # Print y==1 prediction statistics
-    print(f"Validation set y==1 prediction statistics:")
-    print(f"  y==1 total count: {y1_total}")
-    print(f"  y==1 correctly predicted: {y1_correct}")
-    print(f"  y==1 incorrectly predicted: {y1_incorrect}")
-    if y1_total > 0:
-        print(f"  y==1 prediction accuracy: {y1_correct/y1_total:.4f}")
-    else:
-        print(f"  y==1 prediction accuracy: N/A (no y==1 samples)")
-    
-    return avg_loss, accuracy, precision, recall, f1, auc
+    avg_mse = total_mse / len(val_loader)
+    avg_mae = total_mae / len(val_loader)
+    return avg_loss, avg_mse, avg_mae
 
 
-def test_model(model, test_loader, criterion, device, feature_names):
+def test_model(model, test_loader, criterion, device, feature_names, target_indices):
     """Test model performance"""
     model.eval()
-    total_loss = 0
-    all_preds = []
-    all_labels = []
-    all_probs = []
-    
-    # Statistics for y==1 predictions
-    y1_correct = 0  # y==1 and correctly predicted count
-    y1_incorrect = 0  # y==1 but incorrectly predicted count
-    y1_total = 0  # total y==1 count
+    total_loss = 0.0
+    total_mse = 0.0
+    total_mae = 0.0
     
     print("Starting test set evaluation...")
     
@@ -237,82 +172,32 @@ def test_model(model, test_loader, criterion, device, feature_names):
             X, y, mask = X.to(device), y.to(device), mask.to(device)
             
             # Forward pass
-            logits = model(X, mask, feature_names)
-            
-            # Compute loss (use the same logic as training)
+            preds = model(X, mask, feature_names)
+
             if mask.any():
-                # Use whether there are any fraud events in the sequence (suitable for fraud detection)
-                valid_y = y * mask  # consider only valid time steps
-                seq_labels = (valid_y == 1).any(dim=1).float()  # any fraud in sequence
-                
-                # Ensure logits and labels dimensions match
-                if logits.dim() == 1 and seq_labels.dim() == 1:
-                    loss = criterion(logits, seq_labels)
-                else:
-                    # If dimension mismatch, adjust logits
-                    if logits.dim() == 1:
-                        logits = logits.unsqueeze(0)
-                    loss = criterion(logits, seq_labels.unsqueeze(0))
-                
+                pred_steps = preds[:, :-1, :]
+                target_steps = X[:, 1:, target_indices]
+                valid_steps = mask[:, 1:]
+
+                mse, mae = _masked_regression_metrics(pred_steps, target_steps, valid_steps)
+                loss = mse
                 total_loss += loss.item()
-                
-                # Collect predictions and labels
-                probs = torch.sigmoid(logits)
-                preds = probs > 0.5
-                all_preds.extend(preds.cpu().numpy())
-                all_labels.extend(seq_labels.cpu().numpy())
-                all_probs.extend(probs.cpu().numpy())
-                
-                # Stats for y==1 samples
-                labels_np = seq_labels.cpu().numpy()
-                preds_np = preds.cpu().numpy()
-                
-                # Find y==1 samples
-                y1_mask = labels_np == 1
-                y1_total += y1_mask.sum()
-                
-                # Count correct and incorrect among y==1 samples
-                y1_correct += ((preds_np == 1) & y1_mask).sum()
-                y1_incorrect += ((preds_np == 0) & y1_mask).sum()
-    
+                total_mse += mse.item()
+                total_mae += mae.item()
+
     avg_loss = total_loss / len(test_loader)
-    accuracy = accuracy_score(all_labels, all_preds) if all_preds else 0
+    avg_mse = total_mse / len(test_loader)
+    avg_mae = total_mae / len(test_loader)
     
-    # 计算其他指标
-    if all_preds:
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            all_labels, all_preds, average='binary', zero_division=0
-        )
-        try:
-            auc = roc_auc_score(all_labels, all_probs)
-        except ValueError:
-            auc = 0.0
-    else:
-        precision = recall = f1 = auc = 0.0
-    
-    # Print test results
     print("=" * 60)
-    print("Test set evaluation results:")
+    print("Test set evaluation results (regression):")
     print("=" * 60)
-    print(f"test loss: {avg_loss:.4f}")
-    print(f"test accuracy: {accuracy:.4f}")
-    print(f"test precision: {precision:.4f}")
-    print(f"test recall: {recall:.4f}")
-    print(f"test F1: {f1:.4f}")
-    print(f"test AUC: {auc:.4f}")
-    
-    # Print y==1 prediction statistics
-    print(f"\nTest set y==1 prediction statistics:")
-    print(f"  y==1 total count: {y1_total}")
-    print(f"  y==1 correctly predicted: {y1_correct}")
-    print(f"  y==1 incorrectly predicted: {y1_incorrect}")
-    if y1_total > 0:
-        print(f"  y==1 prediction accuracy: {y1_correct/y1_total:.4f}")
-    else:
-        print(f"  y==1 prediction accuracy: N/A (no y==1 samples)")
+    print(f"test loss (MSE): {avg_loss:.6f}")
+    print(f"test MSE: {avg_mse:.6f}")
+    print(f"test MAE: {avg_mae:.6f}")
     print("=" * 60)
     
-    return avg_loss, accuracy, precision, recall, f1, auc
+    return avg_loss, avg_mse, avg_mae
 
 
 def train_model(args):
@@ -345,6 +230,7 @@ def train_model(args):
             batch_size=args.batch_size,
             shuffle=True,
             mode="train",
+            drop_all_zero_batches=False,
             split=(args.train_ratio, args.val_ratio, args.test_ratio),
             seed=args.seed,
             use_sliding_window=getattr(args, 'use_sliding_window', False),
@@ -413,6 +299,27 @@ def train_model(args):
         'Action Type_enc', 'Source Type_enc', 'is_int', 'account_age_quantized'
     ]])
     
+    # Resolve target names (subset to predict)
+    default_target_names = [
+        'Product ID_enc', 'Amount', 'Action Type_enc', 'Source Type_enc',
+        'is_int', 'Post Date_doy', 'Post Time_hour', 'Post Time_minute'
+    ]
+    # Use args.target_names if provided; otherwise default list
+    target_names = getattr(args, 'target_names', None)
+    if not target_names:
+        target_names = default_target_names
+    # Keep only those present in feature_names, preserving feature_names order
+    name_to_idx = {n: i for i, n in enumerate(feature_names)}
+    target_indices = [name_to_idx[n] for n in feature_names if n in set(target_names) and n in name_to_idx]
+    # Also store resolved target_names in the same order as indices
+    resolved_target_names = [feature_names[i] for i in target_indices]
+    args.target_names = resolved_target_names
+    # Ensure pred_dim matches
+    args.pred_dim = len(target_indices) if len(target_indices) > 0 else len(feature_names)
+
+    logger.info(f"Resolved target names: {args.target_names}")
+    logger.info(f"Target indices: {target_indices}")
+
     # Create model
     print("Building model...")
     model = build_model(args).to(device)
@@ -437,25 +344,21 @@ def train_model(args):
     # Per-epoch metrics history
     history = {
         'train_loss': [],
-        'train_acc': [],
+        'train_mse': [],
+        'train_mae': [],
         'val_loss': [],
-        'val_acc': [],
-        'val_precision': [],
-        'val_recall': [],
-        'val_f1': [],
-        'val_auc': [],
+        'val_mse': [],
+        'val_mae': [],
         'epoch_time': []
     }
     for epoch in range(args.epochs):
         start_time = time.time()
         
         # Training
-        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device, feature_names, logger)
+        train_loss, train_mse, train_mae = train_epoch(model, train_loader, optimizer, criterion, device, feature_names, target_indices, logger)
         
         # Validation
-        val_loss, val_acc, val_precision, val_recall, val_f1, val_auc = evaluate(
-            model, val_loader, criterion, device, feature_names
-        )
+        val_loss, val_mse, val_mae = evaluate(model, val_loader, criterion, device, feature_names, target_indices)
         
         # Learning rate scheduling
         scheduler.step(val_loss)
@@ -463,26 +366,21 @@ def train_model(args):
         # Print results
         epoch_time = time.time() - start_time
         print(f"Epoch {epoch+1}/{args.epochs} ({epoch_time:.1f}s)")
-        print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
-        print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
-        print(f"Val Precision: {val_precision:.4f}, Val Recall: {val_recall:.4f}")
-        print(f"Val F1: {val_f1:.4f}, Val AUC: {val_auc:.4f}")
+        print(f"Train MSE: {train_mse:.6f}, Train MAE: {train_mae:.6f}")
+        print(f"Val   MSE: {val_mse:.6f}, Val   MAE: {val_mae:.6f}")
         print("-" * 50)
 
         # Record history
         history['train_loss'].append(float(train_loss))
-        history['train_acc'].append(float(train_acc))
+        history['train_mse'].append(float(train_mse))
+        history['train_mae'].append(float(train_mae))
         history['val_loss'].append(float(val_loss))
-        history['val_acc'].append(float(val_acc))
-        history['val_precision'].append(float(val_precision))
-        history['val_recall'].append(float(val_recall))
-        history['val_f1'].append(float(val_f1))
-        history['val_auc'].append(float(val_auc))
+        history['val_mse'].append(float(val_mse))
+        history['val_mae'].append(float(val_mae))
         history['epoch_time'].append(float(epoch_time))
         
         # Save best model
-        if val_auc > best_auc:
-            best_auc = val_auc
+        if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
             
@@ -493,10 +391,10 @@ def train_model(args):
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'val_loss': val_loss,
-                    'val_auc': val_auc,
+                    'val_mse': val_mse,
                     'args': args
-                }, os.path.join(args.save_dir, 'best_model.pth'))
-                print(f"Saved best model with AUC: {val_auc:.4f}")
+                }, os.path.join(args.save_dir, f'best_model.pth'))
+                print(f"Saved best model with val MSE: {val_mse:.6f}")
         else:
             patience_counter += 1
         
@@ -505,7 +403,7 @@ def train_model(args):
             print(f"Early stopping at epoch {epoch+1}")
             break
     
-    print(f"Training completed. Best AUC: {best_auc:.4f}")
+    print(f"Training completed. Best val loss (MSE): {best_val_loss:.6f}")
 
     # Save training curves and history
     os.makedirs(args.save_dir, exist_ok=True)
@@ -516,19 +414,17 @@ def train_model(args):
     # Write CSV
     with open(history_csv, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        header = ['epoch', 'train_loss', 'train_acc', 'val_loss', 'val_acc', 'val_precision', 'val_recall', 'val_f1', 'val_auc', 'epoch_time']
+        header = ['epoch', 'train_loss', 'train_mse', 'train_mae', 'val_loss', 'val_mse', 'val_mae', 'epoch_time']
         writer.writerow(header)
         for i in range(len(history['train_loss'])):
             writer.writerow([
                 i + 1,
                 history['train_loss'][i],
-                history['train_acc'][i],
+                history['train_mse'][i],
+                history['train_mae'][i],
                 history['val_loss'][i],
-                history['val_acc'][i],
-                history['val_precision'][i],
-                history['val_recall'][i],
-                history['val_f1'][i],
-                history['val_auc'][i],
+                history['val_mse'][i],
+                history['val_mae'][i],
                 history['epoch_time'][i],
             ])
 
@@ -551,33 +447,34 @@ def train_model(args):
         plt.legend()
         plt.grid(True, linestyle='--', alpha=0.4)
 
-        # Subplot 2: Accuracy
+        # Subplot 2: MSE/MAE
         plt.subplot(2, 2, 2)
-        plt.plot(epochs, history['train_acc'], label='Train Acc')
-        plt.plot(epochs, history['val_acc'], label='Val Acc')
+        plt.plot(epochs, history['train_mse'], label='Train MSE')
+        plt.plot(epochs, history['val_mse'], label='Val MSE')
+        plt.plot(epochs, history['train_mae'], label='Train MAE')
+        plt.plot(epochs, history['val_mae'], label='Val MAE')
         plt.xlabel('Epoch')
-        plt.ylabel('Accuracy')
-        plt.title('Accuracy per Epoch')
+        plt.ylabel('Error')
+        plt.title('MSE/MAE per Epoch')
         plt.legend()
         plt.grid(True, linestyle='--', alpha=0.4)
 
-        # Subplot 3: Precision/Recall/F1
+        # Subplot 3: Loss zoom
         plt.subplot(2, 2, 3)
-        plt.plot(epochs, history['val_precision'], label='Val Precision')
-        plt.plot(epochs, history['val_recall'], label='Val Recall')
-        plt.plot(epochs, history['val_f1'], label='Val F1')
+        plt.plot(epochs, history['train_loss'], label='Train Loss (MSE)')
+        plt.plot(epochs, history['val_loss'], label='Val Loss (MSE)')
         plt.xlabel('Epoch')
-        plt.ylabel('Score')
-        plt.title('PRF per Epoch')
+        plt.ylabel('Loss')
+        plt.title('Loss (zoom)')
         plt.legend()
         plt.grid(True, linestyle='--', alpha=0.4)
 
-        # Subplot 4: AUC
+        # Subplot 4: Val MSE
         plt.subplot(2, 2, 4)
-        plt.plot(epochs, history['val_auc'], label='Val AUC')
+        plt.plot(epochs, history['val_mse'], label='Val MSE')
         plt.xlabel('Epoch')
-        plt.ylabel('AUC')
-        plt.title('AUC per Epoch')
+        plt.ylabel('MSE')
+        plt.title('Val MSE per Epoch')
         plt.legend()
         plt.grid(True, linestyle='--', alpha=0.4)
 
@@ -595,33 +492,25 @@ def train_model(args):
         best_model_path = os.path.join(args.save_dir, 'best_model.pth')
         if os.path.exists(best_model_path):
             print("Loading test datasets...")
-            checkpoint = torch.load(best_model_path, map_location=device)
+            checkpoint = torch.load(best_model_path, map_location=device, weights_only=False)
             model.load_state_dict(checkpoint['model_state_dict'])
-            print(f"loaded model at epoch {checkpoint['epoch']+1}, auc on test set: {checkpoint['val_auc']:.4f}")
+            print(f"loaded model at epoch {checkpoint['epoch']+1}, val loss (MSE): {checkpoint.get('val_loss', 0.0):.6f}")
             
             # Perform test set evaluation
-            test_loss, test_acc, test_precision, test_recall, test_f1, test_auc = test_model(
-                model, test_loader, criterion, device, feature_names
-            )
+            test_loss, test_mse, test_mae = test_model(model, test_loader, criterion, device, feature_names, target_indices)
             
             # Log test results
             logger.info("=== Results ===")
-            logger.info(f"loss: {test_loss:.4f}")
-            logger.info(f"accuracy: {test_acc:.4f}")
-            logger.info(f"precision: {test_precision:.4f}")
-            logger.info(f"recall: {test_recall:.4f}")
-            logger.info(f"F1: {test_f1:.4f}")
-            logger.info(f"AUC: {test_auc:.4f}")
+            logger.info(f"loss (MSE): {test_loss:.6f}")
+            logger.info(f"MSE: {test_mse:.6f}")
+            logger.info(f"MAE: {test_mae:.6f}")
             
             # Save test results to file
             test_results = {
-                'test_loss': test_loss,
-                'test_accuracy': test_acc,
-                'test_precision': test_precision,
-                'test_recall': test_recall,
-                'test_f1': test_f1,
-                'test_auc': test_auc,
-                'best_val_auc': best_auc,
+                'test_loss_mse': test_loss,
+                'test_mse': test_mse,
+                'test_mae': test_mae,
+                'best_val_loss': best_val_loss,
                 'epoch': checkpoint['epoch']
             }
             results_file = os.path.join(args.save_dir, 'test_results.json')
@@ -633,9 +522,7 @@ def train_model(args):
     else:
         # If no model saved, directly use current model for testing
         print("eval on...")
-        test_loss, test_acc, test_precision, test_recall, test_f1, test_auc = test_model(
-            model, test_loader, criterion, device, feature_names
-        )
+        test_loss, test_mse, test_mae = test_model(model, test_loader, criterion, device, feature_names, target_indices)
     
     return model
 
@@ -644,7 +531,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train TimeCatLSTM model")
     
     # Data related parameters
-    parser.add_argument("--data_dir", type=str, default="matched", help="Data directory")
+    parser.add_argument("--data_dir", type=str, default="no_fraud", help="Data directory")
     parser.add_argument("--max_len", type=int, default=50, help="Maximum sequence length")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--train_ratio", type=float, default=0.8, help="Training set ratio")

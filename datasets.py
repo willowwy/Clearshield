@@ -19,6 +19,10 @@ def _discretize_amount(amount_series: pd.Series, n_bins: int = 12, percentile: f
     Returns:
         Discretized amount encoding (0 to n_bins-1)
     """
+    # Guard: empty series
+    if amount_series is None or len(amount_series) == 0:
+        return pd.Series([], index=(amount_series.index if isinstance(amount_series, pd.Series) else None), dtype=int)
+
     # 1. Winsorization: clip at specified percentile
     p995 = np.percentile(amount_series, percentile)
     amount_winsorized = np.minimum(amount_series, p995)
@@ -164,7 +168,13 @@ def load_matched_dataframes(matched_dir: str = "matched", mode: str = "train", s
     dataframes = []
     for path in chosen_files:
         df = pd.read_csv(path)
+        # Skip empty DataFrame (no rows)
+        if df.shape[0] == 0:
+            continue
         df = _process_single_dataframe(df)
+        # Skip after processing if still empty or all-NaN rows
+        if df.shape[0] == 0:
+            continue
         dataframes.append(df)
     
     return dataframes
@@ -396,7 +406,7 @@ class CSVConsistentBatchSampler:
 
 
 # Public API to build DataLoader from matched CSVs
-def create_dataloader(matched_dir: str = "matched", max_len: int = 50, batch_size: int = 32, shuffle: bool = True, mode: str = "train", split: tuple[float, float, float] = (0.8, 0.1, 0.1), seed: int = 42, drop_all_zero_batches: bool = True, use_sliding_window: bool = False, window_overlap: float = 0.5):
+def create_dataloader(matched_dir: str = "no_fraud", max_len: int = 50, batch_size: int = 32, shuffle: bool = True, mode: str = "train", split: tuple[float, float, float] = (0.8, 0.1, 0.1), seed: int = 42, drop_all_zero_batches: bool = True, use_sliding_window: bool = False, window_overlap: float = 0.5):
     """
     Create data loader with sliding window support to enhance data utilization efficiency
     
@@ -447,16 +457,16 @@ if __name__ == "__main__":
     try:
         # Test different sliding window configurations
         configs = [
-            {"use_sliding_window": False, "window_overlap": 0.0, "name": "Original Strategy"},
-            {"use_sliding_window": True, "window_overlap": 0.3, "name": "Sliding Window 30% Overlap"},
-            {"use_sliding_window": True, "window_overlap": 0.5, "name": "Sliding Window 50% Overlap"},
-            {"use_sliding_window": True, "window_overlap": 0.7, "name": "Sliding Window 70% Overlap"},
+            {"use_sliding_window": False, "window_overlap": 0.0, "name": "Original Strategy"}#,
+            # {"use_sliding_window": True, "window_overlap": 0.3, "name": "Sliding Window 30% Overlap"},
+            # {"use_sliding_window": True, "window_overlap": 0.5, "name": "Sliding Window 50% Overlap"},
+            # {"use_sliding_window": True, "window_overlap": 0.7, "name": "Sliding Window 70% Overlap"},
         ]
         
         for config in configs:
             print(f"\n--- {config['name']} ---")
             loader, feature_names = create_dataloader(
-                matched_dir="matched",
+                matched_dir="no_fraud",
                 max_len=50,
                 batch_size=32,
                 shuffle=True,

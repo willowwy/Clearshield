@@ -31,21 +31,21 @@ class TimeCatLSTM(nn.Module):
             for name in args.feature_names:
                 if name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized"]:
                     if name == "Member Age":
-                        vocab, emb = 10, 4  # //10 then do embedding
+                        vocab, emb = 10, 10  # //10 then do embedding
                     elif name == "Amount":
-                        vocab, emb = 12, 4  # 12 buckets
+                        vocab, emb = 12, 10  # 12 buckets
                     elif name == "is_int":
-                        vocab, emb = 2, 2   # Boolean value
+                        vocab, emb = 2, 4   # Boolean value
                     elif name == "account_age_quantized":
-                        vocab, emb = 5, 4   # 5 age stages
+                        vocab, emb = 5, 5   # 5 age stages
                     elif "Account Type" in name:
-                        vocab, emb = 15, 4
+                        vocab, emb = 15, 16
                     elif "Product ID" in name:
-                        vocab, emb = 160, 4
+                        vocab, emb = 160, 16
                     elif "Action Type" in name:
-                        vocab, emb = 5, 2
+                        vocab, emb = 5, 5
                     elif "Source Type" in name:
-                        vocab, emb = 20, 4
+                        vocab, emb = 20, 20
                     else:
                         vocab, emb = 50, 4  # Default configuration
                     
@@ -63,12 +63,17 @@ class TimeCatLSTM(nn.Module):
             bidirectional=args.bidirectional,
         )
         last_dim = args.lstm_hidden * (2 if args.bidirectional else 1)
-        self.head = nn.Sequential(
-            nn.Linear(last_dim, last_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(args.dropout),
-            nn.Linear(last_dim // 2, 1),
-        )
+        # Prediction head for next-step vector forecasting
+        # Determine prediction dimension: prefer explicit pred_dim, otherwise use number of target_names
+        inferred_pred_dim = getattr(args, 'pred_dim', 0)
+        if not inferred_pred_dim:
+            target_names = getattr(args, 'target_names', []) or []
+            if target_names:
+                inferred_pred_dim = len(target_names)
+            else:
+                inferred_pred_dim = len(getattr(args, 'feature_names', []) or [])
+        self.pred_dim = inferred_pred_dim
+        self.head = nn.Linear(last_dim, self.pred_dim)
 
     def forward(
         self,
@@ -225,16 +230,12 @@ class TimeCatLSTM(nn.Module):
             packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
             packed_out, _ = self.lstm(packed)
             out, _ = pad_packed_sequence(packed_out, batch_first=True, total_length=x.size(1))
-            idx = (lengths - 1).unsqueeze(1).unsqueeze(2).expand(-1, 1, out.size(2))
-            last = out.gather(1, idx).squeeze(1)
         else:
             out, _ = self.lstm(x)
-            masked = out * mask.unsqueeze(-1)
-            denom = mask.sum(dim=1, keepdim=True).clamp_min(1e-6)
-            last = masked.sum(dim=1) / denom
 
-        logits = self.head(last).squeeze(-1)
-        return logits
+        # Time-distributed linear to produce per-step predictions [B, T, pred_dim]
+        preds = self.head(out)
+        return preds
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -245,6 +246,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     
     # Feature names (for automatic categorical embedding configuration)
     p.add_argument("--feature_names", type=str, nargs="*", default=[], help="Feature name list for automatic embedding configuration")
+
+    # Prediction dimension for next-step vector forecasting (0 => infer from feature_names)
+    p.add_argument("--pred_dim", type=int, default=0, help="Prediction dimension; 0 to infer from feature_names length")
+    # Target feature names to predict (subset of feature_names); if empty, defaults to all
+    p.add_argument("--target_names", type=str, nargs="*", default=[], help="Target feature names to predict; subset of feature_names")
 
     # Time embedding vocabulary and dimensions
     p.add_argument("--day_vocab", type=int, default=366, help="Day vocabulary size")
@@ -293,9 +299,61 @@ if __name__ == "__main__":
         'Action Type_enc', 'Source Type_enc', 'is_int', 'account_age_quantized'
     ]])
     
+    # Build model
     model = build_model(args)
     n_params = sum(p.numel() for p in model.parameters())
     print("Model built.")
     print("Total params:", n_params)
     print("Continuous features dim:", args.cont_dim)
     print("Feature names:", args.feature_names)
+
+    # Inference sanity check: next-step vector prediction
+    torch.manual_seed(0)
+    B, T, F = 2, 6, len(args.feature_names)
+
+    # Create synthetic input X respecting index ranges for time/categorical features
+    X = torch.zeros(B, T, F, dtype=torch.float32)
+    name_to_idx = {n: i for i, n in enumerate(args.feature_names)}
+
+    # Time features within vocab ranges
+    X[:, :, name_to_idx['Post Date_doy']] = torch.randint(0, args.day_vocab, (B, T)).float()
+    X[:, :, name_to_idx['Post Time_hour']] = torch.randint(0, args.hour_vocab, (B, T)).float()
+    X[:, :, name_to_idx['Post Time_minute']] = torch.randint(0, args.minute_vocab, (B, T)).float()
+    X[:, :, name_to_idx['Account Open Date_doy']] = torch.randint(0, args.aod_day_vocab, (B, T)).float()
+
+    # Categorical example ranges
+    def clamp_fill(name: str, vocab: int):
+        if name in name_to_idx:
+            X[:, :, name_to_idx[name]] = torch.randint(0, vocab, (B, T)).float()
+
+    clamp_fill('Account Type_enc', 15)
+    clamp_fill('Product ID_enc', 160)
+    clamp_fill('Action Type_enc', 5)
+    clamp_fill('Source Type_enc', 20)
+    clamp_fill('is_int', 2)
+    clamp_fill('Member Age', 10)
+    clamp_fill('Amount', 12)
+    clamp_fill('account_age_quantized', 5)
+
+    # Any remaining continuous features (if exist)
+    for i, n in enumerate(args.feature_names):
+        if n not in ['Post Date_doy', 'Post Time_hour', 'Post Time_minute', 'Account Open Date_doy',
+                     'Account Type_enc', 'Member Age', 'Product ID_enc', 'Amount',
+                     'Action Type_enc', 'Source Type_enc', 'is_int', 'account_age_quantized']:
+            X[:, :, i] = torch.randn(B, T)
+
+    # Mask: first两步为padding(0)，其余有效(1) —— 仅用于pack/聚合
+    mask = torch.zeros(B, T, dtype=torch.float32)
+    mask[:, 2:] = 1.0
+
+    # Run inference
+    model.eval()
+    with torch.no_grad():
+        preds = model(X, mask, args.feature_names, use_pack=False)  # [B,T,pred_dim]
+        print("Preds shape:", tuple(preds.shape))
+        # 展示前两个时间步的前3维预测
+        print("Preds[0, :2, :3]:\n", preds[0, :2, :3])
+        # 训练时应与下一步对齐：preds[:, :-1] vs X[:, 1:]
+        shift_l2 = (preds[:, :-1, :F] - X[:, 1:, :])**2
+        # 仅演示：对齐后的均方误差（未加权）
+        print("Shifted MSE (demo):", shift_l2.mean().item())
