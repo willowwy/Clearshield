@@ -11,67 +11,35 @@ This fraud detection system combines traditional machine learning with deep lear
 ```
 Clearshield/
 ├── data/
-│   ├── raw/                     # Original datasets
-│   ├── processed/               # Processed datasets
-│   │   ├── features/           # Feature files
-│   │   └── models/             # Model outputs
-│   └── external/               # External data sources
+│   ├── raw/                     # Original datasets (00)
+│   ├── cleaned/                 # Cleaned datasets (01)
+│   ├── processed/               # Processed datasets (02+03) (transaction files per user after matching fraud event, which should be used for model)
+│   └── external/                # External data sources (optional)
 │
-├── docs/
-│   ├── features_overview.md    # Features details breakdown
+├── docs/                        # Documentation files
+│
+├── notebooks/                   # Jupyter notebooks for analysis
 │
 ├── src/
-│   ├── data/
-│   │   ├── __init__.py
-│   │   ├── data_loader.py      # Data loading utilities
-│   │   ├── data_cleaner.py     # Data cleaning functions
-│   │   └── data_validator.py   # Data validation logic
+│   ├── data_preprocess/
+│   │   ├── 01_data_cleaning/       # Data cleaning scripts
+│   │   ├── 02_fraud_relabeling/    # Fraud label adjustment
+│   │   ├── 03_feature_engineering/ # Feature refinement
+│   │   │   ├── 03a_transaction_type_clustering/ # Cluster types
+│   │   │   ├── 03b_description_encoding/        # Process description
+│   │   │   └── feature_pipeline.py
+│   │   ├── 04_vulnerability_scanner/ # Security protection
+│   │   └── pipeline.ipynb       # Main preprocessing pipeline (raw -> processed)
 │   │
-│   ├── features/
-│   │   ├── __init__.py
-│   │   ├── __main__.py
-│   │   ├── base_features.py    # Basic feature extraction
-│   │   ├── time_features.py    # Temporal features
-│   │   ├── amount_features.py  # Transaction amount features
-│   │   ├── merchant_features.py # Merchant-based features
-│   │   ├── user_features.py    # User behavioral features
-│   │   ├── sequence_features.py # LSTM sequence features
-│   │   └── feature_pipeline.py # Feature processing pipeline
-│   │
-│   ├── models/
-│   │   ├── __init__.py
-│   │   ├── base_model.py       # Model base class
-│   │   ├── traditional_ml.py   # Traditional ML models
-│   │   ├── lstm_model.py       # LSTM neural network
-│   │   └── hybrid_model.py     # Hybrid ensemble model
-│   │
-│   ├── utils/
-│   │   ├── __init__.py
-│   │   ├── config.py           # Configuration management
-│   │   ├── helpers.py          # Helper functions
-│   │   └── metrics.py          # Evaluation metrics
-│   │
-│   └── visualization/
-│       ├── __init__.py
-│       └── plots.py            # Visualization utilities
+│   └── models/                  # Model training and evaluation
 │
-├── notebooks/
-│   ├── 01_data_exploration.ipynb
-│   ├── 02_feature_engineering.ipynb
-│   ├── 03_model_development.ipynb
-│   └── 04_evaluation.ipynb
+├── config/                      # Configuration files
 │
-├── config/
-│   ├── feature_config.yaml     # Feature engineering config
-│   ├── model_config.yaml       # Model parameters
-│   └── data_config.yaml        # Data processing config
+├── .venv/                       # Virtual environment
+├── venv/                        # Alternative virtual environment
 │
-├── tests/
-│   ├── test_features.py
-│   ├── test_models.py
-│   └── test_data.py
-│
+├── .gitignore
+├── README.md
 ├── requirements.txt
-├── setup.py
-└── README.md
+└── setup.py
 ```
