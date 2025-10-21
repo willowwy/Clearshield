@@ -4,7 +4,7 @@
 eda
 .DS_Store
 
-data/raw/
-data/processed/
-data/external/
-data/cleaned/
+data/raw/*
+data/processed/*
+data/external/*
+data/cleaned/*
