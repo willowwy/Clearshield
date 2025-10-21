@@ -342,7 +342,7 @@ if __name__ == "__main__":
                      'Action Type_enc', 'Source Type_enc', 'is_int', 'account_age_quantized']:
             X[:, :, i] = torch.randn(B, T)
 
-    # Mask: first两步为padding(0)，其余有效(1) —— 仅用于pack/聚合
+    # Mask: first two steps are padding(0), rest are valid(1) -- only for pack/aggregation
     mask = torch.zeros(B, T, dtype=torch.float32)
     mask[:, 2:] = 1.0
 
@@ -351,9 +351,9 @@ if __name__ == "__main__":
     with torch.no_grad():
         preds = model(X, mask, args.feature_names, use_pack=False)  # [B,T,pred_dim]
         print("Preds shape:", tuple(preds.shape))
-        # 展示前两个时间步的前3维预测
+        # Show first 3 dimensions of predictions for first two time steps
         print("Preds[0, :2, :3]:\n", preds[0, :2, :3])
-        # 训练时应与下一步对齐：preds[:, :-1] vs X[:, 1:]
+        # During training, should align with next step: preds[:, :-1] vs X[:, 1:]
         shift_l2 = (preds[:, :-1, :F] - X[:, 1:, :])**2
-        # 仅演示：对齐后的均方误差（未加权）
+        # Demo only: aligned mean squared error (unweighted)
         print("Shifted MSE (demo):", shift_l2.mean().item())

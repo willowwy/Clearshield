@@ -17,30 +17,30 @@ def load_data(file, path = "./", sample = 20):
 
 def load_multiple(files=None, glob_pattern=None, path="./", sample=-1, add_source=False, join="outer", axis=0, read_kwargs=None):
     """
-    批量读取多个 CSV 并拼接为一个 DataFrame。
+    Batch read multiple CSV files and concatenate into a single DataFrame.
 
     Args:
-        files: 明确的文件名列表（相对 path）。如 ["a.csv", "b.csv"]
-        glob_pattern: 通配符（相对 path）。如 "matched/*.csv"
-        path: 基础目录
-        sample: 每个文件读取的行数；-1 表示读全量
-        add_source: 是否添加来源文件列 `__source_file__`
-        join: 拼接列策略，"outer" 或 "inner"
-        axis: 拼接轴，默认 0（纵向追加）
-        read_kwargs: 透传给 pandas.read_csv 的额外参数(dict)
+        files: Explicit list of file names (relative to path). e.g., ["a.csv", "b.csv"]
+        glob_pattern: Glob pattern (relative to path). e.g., "matched/*.csv"
+        path: Base directory
+        sample: Number of rows to read from each file; -1 means read all
+        add_source: Whether to add source file column `__source_file__`
+        join: Concatenation strategy, "outer" or "inner"
+        axis: Concatenation axis, default 0 (vertical append)
+        read_kwargs: Additional parameters passed to pandas.read_csv (dict)
 
     Returns:
         pd.DataFrame
     """
     if files is None and glob_pattern is None:
-        raise ValueError("必须提供 files 或 glob_pattern 之一")
+        raise ValueError("Must provide either files or glob_pattern")
 
     read_kwargs = read_kwargs or {}
-    # 确保稳定列推断
+    # Ensure stable column inference
     if "low_memory" not in read_kwargs:
         read_kwargs["low_memory"] = False
 
-    # 解析文件列表
+    # Parse file list
     file_paths = []
     if files:
         file_paths.extend([os.path.join(path, f) for f in files])
@@ -48,7 +48,7 @@ def load_multiple(files=None, glob_pattern=None, path="./", sample=-1, add_sourc
         file_paths.extend(glob.glob(os.path.join(path, glob_pattern)))
 
     if not file_paths:
-        raise FileNotFoundError("未找到任何可读取的文件")
+        raise FileNotFoundError("No readable files found")
 
     frames = []
     for fp in sorted(file_paths):
