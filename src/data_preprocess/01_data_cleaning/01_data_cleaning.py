@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CSV Data Cleaning Script
+CSV Data Cleaning Script - Final Version
 Cleans and standardizes transaction CSV files with automatic field correction and renaming.
 """
 
@@ -8,7 +8,6 @@ import os
 import csv
 import re
 import warnings
-from io import StringIO
 import pandas as pd
 
 warnings.filterwarnings('ignore')
@@ -24,12 +23,6 @@ STANDARD_HEADERS = [
     'Action Type', 'Source Type', 'Transaction Description',
     'Fraud Adjustment Indicator'
 ]
-
-
-def clean_amount(match):
-    """Remove quotes, dollar signs, and commas from amount strings."""
-    amount_text = match.group(0)
-    return amount_text.replace('"', '').replace('$', '').replace(',', '').strip()
 
 
 def normalize_header(header_fields):
@@ -52,14 +45,10 @@ def get_unique_filename(output_dir, filename):
     """Generate unique filename if file already exists."""
     output_path = os.path.join(output_dir, filename)
 
-    # If file doesn't exist, return original name
     if not os.path.exists(output_path):
         return filename
 
-    # Extract name and extension
     name, ext = os.path.splitext(filename)
-
-    # Try adding suffix (1), (2), (3), etc.
     counter = 1
     while True:
         new_filename = f"{name}_v{counter}{ext}"
@@ -69,48 +58,31 @@ def get_unique_filename(output_dir, filename):
         counter += 1
 
 
-def preprocess_lines(lines):
-    """Clean amount fields and transaction description commas."""
-    processed_lines = []
-    fixed_amount = 0
-    fixed_desc_comma = 0
+def clean_field(field_value):
+    """Clean a single field: remove newlines, normalize whitespace."""
+    if not field_value:
+        return field_value
 
-    for idx, line in enumerate(lines):
-        if idx == 0:  # Keep header as-is
-            processed_lines.append(line)
-            continue
+    # Remove all types of newlines
+    cleaned = field_value.replace('\r\n', ' ')
+    cleaned = cleaned.replace('\n', ' ')
+    cleaned = cleaned.replace('\r', ' ')
 
-        # Clean amount patterns
-        new_line = re.sub(r'"\$[\d,]*\.?\d+"|\$[\d,]*\.?\d+', clean_amount, line)
-        if new_line != line:
-            fixed_amount += 1
+    # Normalize multiple spaces to single space
+    cleaned = re.sub(r'\s+', ' ', cleaned)
 
-        # Clean commas in Transaction Description field (12th field, index 11)
-        fields = new_line.split(',')
-        if len(fields) > 13:
-            desc_parts = fields[11:-1]
-            merged_desc = re.sub(r'\s+', ' ', ' '.join(desc_parts)).strip()
-            new_fields = fields[:11] + [merged_desc] + [fields[-1]]
-            new_line = ','.join(new_fields)
-            fixed_desc_comma += 1
+    # Strip leading/trailing whitespace
+    cleaned = cleaned.strip()
 
-        processed_lines.append(new_line)
-
-    return processed_lines, fixed_amount, fixed_desc_comma
+    return cleaned
 
 
 def process_csv_file(file_path, output_dir):
     """Process a single CSV file with cleaning and standardization."""
-    # Step 1: Pre-process raw lines
+    # Read CSV file (csv.reader handles quoted newlines automatically)
     with open(file_path, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
-
-    processed_lines, fixed_amount, fixed_desc_comma = preprocess_lines(lines)
-
-    # Step 2: Parse with CSV module
-    csv_text = ''.join(processed_lines)
-    reader = csv.reader(StringIO(csv_text))
-    all_rows = list(reader)
+        reader = csv.reader(f)
+        all_rows = list(reader)
 
     if not all_rows:
         return None, "EMPTY"
@@ -128,7 +100,7 @@ def process_csv_file(file_path, output_dir):
         idx_map = {}
 
     cleaned_rows = [normalized_header]
-    fixed_comma = fixed_missing = 0
+    fixed_comma = fixed_missing = fixed_amount = fixed_newlines = 0
     first_date = last_date = None
 
     # Process data rows
@@ -139,7 +111,7 @@ def process_csv_file(file_path, output_dir):
         while len(fields) > 13 and not fields[-1].strip():
             fields.pop()
 
-        # Merge extra fields
+        # Merge extra fields (from Transaction Description commas)
         while len(fields) > 13:
             fields[-3] = fields[-3] + ' ' + fields[-2]
             fields.pop(-2)
@@ -148,6 +120,27 @@ def process_csv_file(file_path, output_dir):
         # Pad if needed
         while len(fields) < 13:
             fields.append('')
+
+        # CRITICAL: Clean ALL fields to remove newlines
+        for i in range(len(fields)):
+            original = fields[i]
+            cleaned = clean_field(original)
+
+            # Track if we fixed a newline
+            if '\n' in original or '\r' in original:
+                fixed_newlines += 1
+
+            fields[i] = cleaned
+
+        # Clean amount field (remove dollar signs and commas)
+        if 'Amount' in idx_map:
+            amount_idx = idx_map['Amount']
+            if 0 <= amount_idx < len(fields):
+                amount_val = fields[amount_idx]
+                cleaned_amount = amount_val.replace('$', '').replace(',', '').strip()
+                if cleaned_amount != amount_val:
+                    fields[amount_idx] = cleaned_amount
+                    fixed_amount += 1
 
         # Track date range
         if 'Post Date' in idx_map:
@@ -181,7 +174,7 @@ def process_csv_file(file_path, output_dir):
 
         cleaned_rows.append(fields)
 
-    # Step 3: Merge Transaction Description into Fraud Adjustment Indicator
+    # Merge Transaction Description into Fraud Adjustment Indicator
     fraud_idx = None
     desc_idx = None
 
@@ -193,7 +186,7 @@ def process_csv_file(file_path, output_dir):
 
     merged_count = 0
     if fraud_idx is not None and desc_idx is not None:
-        for row in cleaned_rows[1:]:  # Skip header
+        for row in cleaned_rows[1:]:
             if len(row) > max(fraud_idx, desc_idx):
                 fraud_val = row[fraud_idx].strip()
                 desc_val = row[desc_idx].strip()
@@ -210,7 +203,7 @@ def process_csv_file(file_path, output_dir):
         last_str = last_date.strftime('%m-%d-%Y')
         output_filename = f"{first_str}_to_{last_str}.csv"
 
-    # Check for duplicate and get unique filename
+    # Get unique filename if needed
     output_filename = get_unique_filename(output_dir, output_filename)
 
     # Save cleaned file
@@ -224,7 +217,7 @@ def process_csv_file(file_path, output_dir):
         'fixed_comma': fixed_comma,
         'fixed_amount': fixed_amount,
         'fixed_missing': fixed_missing,
-        'fixed_desc_comma': fixed_desc_comma,
+        'fixed_newlines': fixed_newlines,
         'merged_fraud': merged_count,
         'renamed': output_filename != os.path.basename(file_path),
         'new_name': output_filename if ENABLE_RENAMING else None
@@ -279,8 +272,8 @@ def main():
             msg.append(f"Amount:{stats['fixed_amount']}")
         if stats['fixed_missing'] > 0:
             msg.append(f"Missing:{stats['fixed_missing']}")
-        if stats['fixed_desc_comma'] > 0:
-            msg.append(f"Desc_Comma:{stats['fixed_desc_comma']}")
+        if stats['fixed_newlines'] > 0:
+            msg.append(f"Newlines:{stats['fixed_newlines']}")
         if stats['merged_fraud'] > 0:
             msg.append(f"Fraud_Merged:{stats['merged_fraud']}")
         if stats['renamed']:

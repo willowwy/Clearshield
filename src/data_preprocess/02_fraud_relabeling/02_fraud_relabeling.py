@@ -9,6 +9,7 @@ INPUT_DIR = '../../../data/cleaned1'
 OUTPUT_MEMBER_DIR = '../../../data/by_member1'
 OUTPUT_PROCESSED_DIR = '../../../data/processed'
 CHUNKSIZE = 50000
+MIN_HISTORY_LENGTH = 10  # Minimum number of transactions required
 
 
 def reorganize_by_member(input_dir, output_dir, chunksize):
@@ -61,21 +62,48 @@ def reorganize_by_member(input_dir, output_dir, chunksize):
 
 
 def extract_fraud_date_from_description(description, adjustment_date):
-    """Extract date from fraud adjustment description"""
+    """Extract date from fraud adjustment description
+
+    Supports formats (in priority order):
+    1. M/D/YYYY or MM/DD/YYYY (e.g., 2/3/2025, 12/31/2024)
+    2. M/D or MM/DD (e.g., 2/3, 12/31) - uses adjustment year
+    3. M.D.YYYY or MM.DD.YYYY (e.g., 2.3.2025, 12.31.2024)
+    4. M.D or MM.DD (e.g., 2.3, 12.31) - uses adjustment year
+    """
     if pd.isna(description):
         return None
 
-    # Try M/D or MM/DD format
-    match = re.search(r'(\d{1,2}/\d{1,2})', str(description))
+    description_str = str(description)
+
+    # Priority 1: M/D/YYYY or MM/DD/YYYY format
+    match = re.search(r'(\d{1,2})/(\d{1,2})/(\d{4})', description_str)
     if match:
         try:
-            month, day = map(int, match.group(1).split('/'))
+            month, day, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            return pd.Timestamp(year, month, day)
+        except:
+            pass
+
+    # Priority 2: M/D or MM/DD format (no year, use adjustment year)
+    match = re.search(r'(\d{1,2})/(\d{1,2})(?!/)', description_str)
+    if match:
+        try:
+            month, day = int(match.group(1)), int(match.group(2))
             return pd.Timestamp(adjustment_date.year, month, day)
         except:
             pass
 
-    # Try M.D or MM.DD format
-    match = re.search(r'(\d{1,2})\.(\d{1,2})', str(description))
+    # Priority 3: M.D.YYYY or MM.DD.YYYY format
+    match = re.search(r'(\d{1,2})\.(\d{1,2})\.(\d{4})', description_str)
+    if match:
+        try:
+            month, day, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
+            return pd.Timestamp(year, month, day)
+        except:
+            pass
+
+    # Priority 4: M.D or MM.DD format (no year, use adjustment year)
+    match = re.search(r'(\d{1,2})\.(\d{1,2})(?!\.)', description_str)
     if match:
         try:
             month, day = int(match.group(1)), int(match.group(2))
@@ -140,9 +168,17 @@ def match_fraud_adjustment_to_transaction(fraud_row, df, used_indices):
             other_days = candidates[candidates['Post Date'] < fraud_date]
             candidates = pd.concat([other_days, same_day])
 
+            # Check if filtering removed all candidates
+            if candidates.empty:
+                return -1
+
         candidates = candidates.sort_values(['Post Date', 'Post Time'])
     else:
         candidates = candidates.sort_values('Post Date')
+
+    # Final check before accessing index
+    if candidates.empty:
+        return -1
 
     # Prioritize Mobile Deposit
     if 'Transaction Description' in df.columns:
@@ -154,7 +190,7 @@ def match_fraud_adjustment_to_transaction(fraud_row, df, used_indices):
 
 
 def process_single_member_fraud(member_data):
-    """Process fraud matching for a single member - only mark Fraud column, never delete records"""
+    """Process fraud matching for a single member - mark Fraud column and remove matched adjustment records"""
     df = member_data.copy()
     df['Post Date'] = pd.to_datetime(df['Post Date'])
     df['Fraud'] = 0
@@ -170,28 +206,50 @@ def process_single_member_fraud(member_data):
 
     used_indices = set()
     matched_count = 0
+    adjustment_indices_to_remove = []  # Track adjustment records to delete
 
-    for _, fraud_adj in fraud_adjustments.iterrows():
+    for idx, fraud_adj in fraud_adjustments.iterrows():
         match_idx = match_fraud_adjustment_to_transaction(fraud_adj, df, used_indices)
 
         if match_idx >= 0:
+            # Mark the original transaction as fraud
             df.loc[match_idx, 'Fraud'] = 1
             used_indices.add(match_idx)
             matched_count += 1
 
+            # Mark the adjustment record for deletion
+            adjustment_indices_to_remove.append(idx)
+
     total_adjustments = len(fraud_adjustments)
+
+    # Remove successfully matched adjustment records
+    if adjustment_indices_to_remove:
+        df = df.drop(adjustment_indices_to_remove).reset_index(drop=True)
+
     return df, matched_count, total_adjustments
 
 
-def process_member_files_for_fraud(member_dir, output_dir):
-    """Process member files for fraud detection - keep all records intact"""
+def process_member_files_for_fraud(member_dir, output_dir, min_history_length=None):
+    """Process member files for fraud detection - keep all records intact
+
+    Args:
+        member_dir: Directory containing member files
+        output_dir: Output directory for processed files
+        min_history_length: Minimum transaction count required (None = use global MIN_HISTORY_LENGTH)
+    """
+    if min_history_length is None:
+        min_history_length = MIN_HISTORY_LENGTH
+
     for subdir in ['matched', 'unmatched', 'no_fraud']:
         os.makedirs(os.path.join(output_dir, subdir), exist_ok=True)
 
     member_files = sorted(glob(os.path.join(member_dir, 'member_*.csv')))
     print(f"Found {len(member_files)} member files")
 
-    stats = {'matched': 0, 'unmatched': 0, 'no_fraud': 0, 'total': len(member_files)}
+    if min_history_length > 0:
+        print(f"Filtering: only processing members with >= {min_history_length} transactions")
+
+    stats = {'matched': 0, 'unmatched': 0, 'no_fraud': 0, 'total': 0, 'skipped': 0}
     summary_records = []
 
     for i, member_file in enumerate(member_files, 1):
@@ -200,6 +258,13 @@ def process_member_files_for_fraud(member_dir, output_dir):
         try:
             df = pd.read_csv(member_file, low_memory=False)
             member_id = os.path.basename(member_file).replace('member_', '').replace('.csv', '')
+
+            # Filter by minimum history length
+            if len(df) < min_history_length:
+                stats['skipped'] += 1
+                continue
+
+            stats['total'] += 1
 
             fraud_col = df['Fraud Adjustment Indicator'].astype(str)
             has_fraud = (fraud_col != 'nan') & (fraud_col.str.strip() != '')
@@ -250,6 +315,52 @@ def process_member_files_for_fraud(member_dir, output_dir):
     summary_path = os.path.join(output_dir, 'member_summary.csv')
     summary_df.to_csv(summary_path, index=False)
     print(f"Summary saved to: {summary_path}")
+
+    return stats
+
+
+def run_stage1():
+    """Run Stage 1: Data Reorganization"""
+    print("=" * 60)
+    print("STAGE 1: DATA REORGANIZATION")
+    print("=" * 60)
+    print(f"Input: {INPUT_DIR}")
+    print(f"Output: {OUTPUT_MEMBER_DIR}\n")
+
+    num_members = reorganize_by_member(INPUT_DIR, OUTPUT_MEMBER_DIR, CHUNKSIZE)
+    print(f"\n{num_members} member files created\n")
+
+    return num_members
+
+
+def run_stage2(min_history_length=None):
+    """Run Stage 2: Fraud Detection
+
+    Args:
+        min_history_length: Minimum transaction count required (None = use global MIN_HISTORY_LENGTH)
+    """
+    if min_history_length is None:
+        min_history_length = MIN_HISTORY_LENGTH
+
+    print("=" * 60)
+    print("STAGE 2: FRAUD DETECTION")
+    print("=" * 60)
+    print(f"Input: {OUTPUT_MEMBER_DIR}")
+    print(f"Output: {OUTPUT_PROCESSED_DIR}")
+    print(f"Min History Length: {min_history_length}\n")
+
+    stats = process_member_files_for_fraud(OUTPUT_MEMBER_DIR, OUTPUT_PROCESSED_DIR, min_history_length)
+
+    print(f"\nProcessing Summary:")
+    print(f"  Total Processed: {stats['total']}")
+    print(f"  Skipped (< {min_history_length} txns): {stats['skipped']}")
+    print(f"  No Fraud: {stats['no_fraud']}")
+    print(f"  Matched: {stats['matched']}")
+    print(f"  Unmatched: {stats['unmatched']}")
+
+    print("\n" + "=" * 60)
+    print("COMPLETE")
+    print("=" * 60)
 
     return stats
 
