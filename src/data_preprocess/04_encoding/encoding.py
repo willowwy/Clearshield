@@ -5,7 +5,7 @@ import os
 
 # Configuration
 PROCESSED_DIR = '../../data/processed'
-CONFIG_PATH = '../../config/tokenize_dict.json'
+CONFIG_PATH = '../../config/tokenize_dict.json' #json cnofig
 CAT_FEATURES = ["Account Type", "Action Type", "Source Type", "Product ID"]
 
 
