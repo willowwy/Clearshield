@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CSV Data Cleaning Script - Final Version
+CSV Data Cleaning Script
 Cleans and standardizes transaction CSV files with automatic field correction and renaming.
 """
 
