@@ -9,11 +9,13 @@ This fraud detection system combines traditional machine learning with deep lear
 ## 📁 Project Structure
 
 ```
-Clearshield/
+ClearShield/
 ├── data/
 │   ├── raw/                     # Original datasets (00)
 │   ├── cleaned/                 # Cleaned datasets (01)
-│   ├── processed/               # Processed datasets (02+03) (transaction files per user after matching fraud event, which should be used for model)
+│   ├── processed/               # Processed datasets (02+03)
+│   │                            # Transaction files per user after matching fraud events
+│   │                            # Ready for model training
 │   └── external/                # External data sources (optional)
 │
 ├── docs/                        # Documentation files
@@ -25,13 +27,16 @@ Clearshield/
 │   │   ├── 01_data_cleaning/       # Data cleaning scripts
 │   │   ├── 02_fraud_relabeling/    # Fraud label adjustment
 │   │   ├── 03_feature_engineering/ # Feature refinement
-│   │   │   ├── 03a_transaction_type_clustering/ # Cluster types
-│   │   │   ├── 03b_description_encoding/        # Process description
-│   │   │   └── feature_pipeline.py
-│   │   ├── 04_vulnerability_scanner/ # Security protection
-│   │   └── pipeline.ipynb       # Main preprocessing pipeline (raw -> processed)
+│   │   │   ├── 03a_transaction_type_clustering/ # Cluster transaction types
+│   │   │   ├── 03b_description_encoding/        # Process descriptions
+│   │   │   └── feature_pipeline.py              # Feature engineering pipeline
+│   │   ├── 04_encoding/            # Data encoding
+│   │   ├── 05_vulnerability_scanner/ # Security protection
+│   │   └── pipeline.ipynb          # Main preprocessing pipeline (raw → processed)
 │   │
-│   └── models/                  # Model training and evaluation
+│   └── models/
+│       ├── preprocessing/          # Model-specific preprocessing
+│       └── __init__.py
 │
 ├── config/                      # Configuration files
 │
@@ -43,3 +48,32 @@ Clearshield/
 ├── requirements.txt
 └── setup.py
 ```
+
+
+
+## 🚀 Quick Start
+
+1. **Clone the repository**
+
+```bash
+   git clone <repository-url>
+   cd ClearShield
+```
+
+2. **Set up virtual environment**
+
+```bash
+   python -m venv .venv
+   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+   pip install -r requirements.txt
+```
+
+3. **Run the preprocessing pipeline**
+
+- Open `src/data_preprocess/pipeline.ipynb`
+- Execute cells sequentially to transform raw data into processed datasets
+
+4. **Train models**
+
+- Navigate to `src/models/`
+- Follow model-specific training instructions
