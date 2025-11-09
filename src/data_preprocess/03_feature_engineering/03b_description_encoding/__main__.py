@@ -1,6 +1,6 @@
-# src/03_feature_engineering/__main__.py
+"""Module entry point for `python -m ...03b_description_encoding`."""
 
-from . import build_all_features
+from .run_pipeline import main
 
 if __name__ == "__main__":
-    build_all_features()
+    main()
