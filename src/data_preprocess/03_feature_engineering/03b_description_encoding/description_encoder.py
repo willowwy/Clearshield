@@ -1,207 +1,248 @@
 """
-Utilities to build text embeddings for transaction descriptions.
+Fast GPU-friendly clustering pipeline for transaction descriptions.
 
-The main entry point is `generate_description_embeddings`, which:
-  1. Loads a pretrained BERT model (configurable).
-  2. Encodes the chosen description column into sentence-level embeddings.
-  3. Applies an optional dimensionality reduction step (defaults to PCA).
-
-Example:
-    >>> import pandas as pd
-    >>> from .description_encoder import generate_description_embeddings
-    >>> df = pd.read_csv("transaction_data.csv")
-    >>> desc_embeddings = generate_description_embeddings(df)
+This module powers the CLI in `run_pipeline.py` and can also be imported
+programmatically. It scans CSV files, encodes the text column with a
+small BERT model, reduces the embeddings via PCA, and clusters them with
+MiniBatchKMeans. Each processed CSV receives a new `cluster_id` column
+and is written to a mirrored folder structure rooted at `clustered_out`.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable, Optional, Sequence
+import os
+from pathlib import Path
+from typing import Iterable, Sequence
 
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.cluster import MiniBatchKMeans
+from sklearn.decomposition import PCA
+from transformers import AutoModel, AutoTokenizer
+from tqdm import tqdm
 
-try:
-    from transformers import AutoModel, AutoTokenizer
-except ImportError as exc:  # pragma: no cover - dependency guard
-    raise ImportError(
-        "The 'transformers' package is required for description encoding. "
-        "Install it via `pip install transformers`."
-    ) from exc
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-try:
-    from sklearn.decomposition import PCA
-except ImportError as exc:  # pragma: no cover - dependency guard
-    raise ImportError(
-        "scikit-learn is required for PCA dimensionality reduction. "
-        "Install it via `pip install scikit-learn`."
-    ) from exc
+DEFAULT_MODEL_NAME = "prajjwal1/bert-tiny"
+DEFAULT_TEXT_COLUMN = "Transaction Description"
+DEFAULT_RAW_ROOT = "/home/ubuntu/data_unzipped"
 
-try:
-    from umap import UMAP
-    _HAS_UMAP = True
-except ImportError:
-    _HAS_UMAP = False
-
-
-@dataclass(frozen=True)
-class DescriptionEncoderConfig:
-    """Configuration container for description embedding generation."""
-
-    text_column: str = "Description"
-    model_name: str = "bert-base-uncased"
-    batch_size: int = 32
-    max_length: int = 64
-    output_dim: int = 50
-    reduction_method: str = "pca"
-    random_state: int = 42
-    device: Optional[str] = None
-    id_columns: Sequence[str] = (
-        "Member ID",
-        "Account ID",
-        "Transaction ID",
-        "TxnOrdinal",
-    )
-    include_text_column: bool = False
+__all__ = [
+    "DEFAULT_MODEL_NAME",
+    "DEFAULT_TEXT_COLUMN",
+    "DEFAULT_RAW_ROOT",
+    "get_device",
+    "mean_pool",
+    "encode_texts",
+    "reduce_pca",
+    "heuristic_k",
+    "process_csv",
+    "run_pipeline",
+]
 
 
-def _iter_batches(values: Sequence[str], batch_size: int) -> Iterable[list[str]]:
-    for start in range(0, len(values), batch_size):
-        yield list(values[start : start + batch_size])
-
-
-def _mean_pool(last_hidden_state: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-    """Average token embeddings with mask awareness."""
-    mask = attention_mask.unsqueeze(-1).type_as(last_hidden_state)
-    masked_hidden = last_hidden_state * mask
-    summed = masked_hidden.sum(dim=1)
-    lengths = mask.sum(dim=1).clamp(min=1.0)
-    return summed / lengths
-
-
-def _reduce_embeddings(
-    embeddings: np.ndarray,
-    method: Optional[str],
-    target_dim: Optional[int],
-    random_state: int,
-) -> tuple[np.ndarray, Optional[str]]:
-    """Apply dimensionality reduction; returns transformed embeddings and a suffix label."""
-    if method is None or target_dim is None:
-        return embeddings, "bert"
-
-    method = method.lower()
-    if method == "none":
-        return embeddings, "bert"
-
-    if target_dim >= embeddings.shape[1]:
-        # Nothing to reduce, return original representation.
-        return embeddings, "bert"
-
-    if method == "pca":
-        reducer = PCA(n_components=target_dim, random_state=random_state)
-        reduced = reducer.fit_transform(embeddings)
-        return reduced, "pca"
-
-    if method == "umap":
-        if not _HAS_UMAP:
-            raise ImportError(
-                "UMAP reduction requested but `umap-learn` is not installed. "
-                "Install it via `pip install umap-learn numba`."
-            )
-        reducer = UMAP(n_components=target_dim, random_state=random_state)
-        reduced = reducer.fit_transform(embeddings)
-        return reduced, "umap"
-
-    raise ValueError(f"Unsupported reduction method '{method}'. Use 'pca', 'umap', or 'none'.")
-
-
-def _select_identifier_columns(df: pd.DataFrame, candidate_cols: Sequence[str]) -> pd.DataFrame:
-    available_cols = [col for col in candidate_cols if col in df.columns]
-    if available_cols:
-        return df[available_cols].reset_index(drop=True)
-
-    # Fallback: preserve the original positional index
-    return pd.DataFrame({"row_index": df.index}).reset_index(drop=True)
-
-
-def _resolve_device(device: Optional[str]) -> str:
-    if device:
-        return device
+def get_device() -> str:
     if torch.cuda.is_available():
         return "cuda"
-    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():  # pragma: no cover - macOS specific
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return "mps"
     return "cpu"
 
 
-def generate_description_embeddings(
-    transactions: pd.DataFrame,
-    config: DescriptionEncoderConfig | None = None,
-) -> pd.DataFrame:
-    """
-    Encode transaction descriptions into dense vectors.
+def mean_pool(last_hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    expanded_mask = mask.unsqueeze(-1).type_as(last_hidden)
+    summed = (last_hidden * expanded_mask).sum(dim=1)
+    counts = expanded_mask.sum(dim=1).clamp(min=1.0)
+    return summed / counts
 
-    Args:
-        transactions: Source DataFrame containing at least the `config.text_column`.
-        config: Optional DescriptionEncoderConfig. If omitted, defaults are used.
 
-    Returns:
-        DataFrame with identifier columns and embedding features.
-    """
-    cfg = config or DescriptionEncoderConfig()
+def _batched(iterable: Sequence[str], batch_size: int) -> Iterable[list[str]]:
+    for idx in range(0, len(iterable), batch_size):
+        yield list(iterable[idx : idx + batch_size])
 
-    if cfg.text_column not in transactions.columns:
-        raise KeyError(
-            f"Column '{cfg.text_column}' not found in the provided DataFrame. "
-            f"Available columns: {list(transactions.columns)}"
-        )
 
-    device = _resolve_device(cfg.device)
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
-    model = AutoModel.from_pretrained(cfg.model_name)
-    model.to(device)
-    model.eval()
+def encode_texts(
+    texts: Sequence[str],
+    *,
+    model_name: str = DEFAULT_MODEL_NAME,
+    batch_size: int = 64,
+    max_length: int = 64,
+) -> np.ndarray:
+    device = get_device()
+    print(f"[Device] Using {device}")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModel.from_pretrained(model_name).to(device).eval()
 
-    text_series = transactions[cfg.text_column].fillna("").astype(str)
-    texts = text_series.tolist()
-
-    all_embeddings = []
+    embeddings: list[np.ndarray] = []
     with torch.no_grad():
-        for batch_texts in _iter_batches(texts, cfg.batch_size):
+        for batch in tqdm(_batched(texts, batch_size), desc="Encoding"):
             encoded = tokenizer(
-                batch_texts,
+                batch,
                 padding=True,
                 truncation=True,
-                max_length=cfg.max_length,
+                max_length=max_length,
                 return_tensors="pt",
-            )
-            encoded = {k: v.to(device) for k, v in encoded.items()}
-            outputs = model(**encoded)
-            sentence_embeddings = _mean_pool(outputs.last_hidden_state, encoded["attention_mask"])
-            all_embeddings.append(sentence_embeddings.cpu().numpy())
+            ).to(device)
+            output = model(**encoded)
+            pooled = mean_pool(output.last_hidden_state, encoded["attention_mask"])
+            embeddings.append(pooled.cpu().numpy())
 
-    if not all_embeddings:
-        raise ValueError("No descriptions were encoded; check that the input DataFrame is not empty.")
+    return np.vstack(embeddings)
 
-    embeddings_matrix = np.vstack(all_embeddings)
-    reduced_embeddings, suffix = _reduce_embeddings(
-        embeddings_matrix,
-        cfg.reduction_method,
-        cfg.output_dim,
-        cfg.random_state,
+
+def reduce_pca(
+    vectors: np.ndarray,
+    dim: int = 20,
+    *,
+    random_state: int = 42,
+) -> np.ndarray:
+    print(f"[PCA] Reducing to {dim} dimensions...")
+    reducer = PCA(n_components=dim, random_state=random_state)
+    return reducer.fit_transform(vectors)
+
+
+def heuristic_k(
+    vectors: np.ndarray,
+    *,
+    min_k: int = 10,
+    max_k: int = 60,
+    step: int = 10,
+    sample_size: int = 10_000,
+    random_state: int = 42,
+) -> int:
+    sample_size = min(sample_size, len(vectors))
+    sample_idx = np.random.default_rng(random_state).choice(len(vectors), sample_size, replace=False)
+    sample = vectors[sample_idx]
+    print(f"[Auto-K] Searching between {min_k}-{max_k}")
+
+    scores: list[tuple[int, float]] = []
+    for k in range(min_k, max_k + 1, step):
+        km = MiniBatchKMeans(
+            n_clusters=k,
+            random_state=random_state,
+            batch_size=2048,
+            n_init="auto",
+        )
+        km.fit(sample)
+        scores.append((k, km.inertia_))
+
+    best_k = min(scores, key=lambda item: item[1])[0]
+    print(f"[Best K] {best_k}")
+    return best_k
+
+
+def _resolve_output_path(file_path: str) -> str:
+    if "/processed/" in file_path:
+        return file_path.replace("/processed/", "/clustered_out/")
+    if "/raw/" in file_path:
+        return file_path.replace("/raw/", "/clustered_out/")
+
+    path = Path(file_path)
+    return str(path.parent / "clustered_out" / path.name)
+
+
+def process_csv(
+    file_path: str,
+    *,
+    text_column: str = DEFAULT_TEXT_COLUMN,
+    model_name: str = DEFAULT_MODEL_NAME,
+    batch_size: int = 64,
+    max_length: int = 64,
+    pca_dim: int = 20,
+    min_k: int = 10,
+    max_k: int = 60,
+    k_step: int = 10,
+    sample_size: int = 10_000,
+    cluster_batch_size: int = 4096,
+    random_state: int = 42,
+) -> str | None:
+    try:
+        df = pd.read_csv(file_path)
+    except Exception as exc:
+        print(f"[Skip] Cannot read {file_path}: {exc}")
+        return None
+
+    if text_column not in df.columns:
+        print(f"[Skip] Missing column '{text_column}' in {file_path}")
+        return None
+
+    texts = df[text_column].fillna("").astype(str).tolist()
+    if not texts:
+        print(f"[Skip] Empty text column in {file_path}")
+        return None
+
+    embeddings = encode_texts(
+        texts,
+        model_name=model_name,
+        batch_size=batch_size,
+        max_length=max_length,
+    )
+    reduced = reduce_pca(embeddings, dim=pca_dim, random_state=random_state)
+    best_k = heuristic_k(
+        reduced,
+        min_k=min_k,
+        max_k=max_k,
+        step=k_step,
+        sample_size=sample_size,
+        random_state=random_state,
     )
 
-    feature_cols = [
-        f"description_embedding_{suffix}_{idx:03d}"
-        for idx in range(reduced_embeddings.shape[1])
-    ]
+    km = MiniBatchKMeans(
+        n_clusters=best_k,
+        random_state=random_state,
+        batch_size=cluster_batch_size,
+        n_init="auto",
+    )
+    df["cluster_id"] = km.fit_predict(reduced)
 
-    feature_df = pd.DataFrame(reduced_embeddings, columns=feature_cols)
-    id_df = _select_identifier_columns(transactions, cfg.id_columns)
+    output_path = _resolve_output_path(file_path)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    df.to_csv(output_path, index=False)
+    print(f"[Saved] {output_path}")
+    return output_path
 
-    output_parts = [id_df, feature_df]
-    if cfg.include_text_column:
-        output_parts.append(text_series.reset_index(drop=True).to_frame(name=cfg.text_column))
 
-    return pd.concat(output_parts, axis=1)
+def run_pipeline(
+    raw_root: str = DEFAULT_RAW_ROOT,
+    *,
+    model_name: str = DEFAULT_MODEL_NAME,
+    text_column: str = DEFAULT_TEXT_COLUMN,
+    batch_size: int = 64,
+    max_length: int = 64,
+    pca_dim: int = 20,
+    min_k: int = 10,
+    max_k: int = 60,
+    k_step: int = 10,
+    sample_size: int = 10_000,
+    cluster_batch_size: int = 4096,
+    random_state: int = 42,
+) -> list[str]:
+    all_csvs: list[str] = []
+    for root, _, files in os.walk(raw_root):
+        for name in files:
+            if name.endswith(".csv"):
+                all_csvs.append(os.path.join(root, name))
+
+    print(f"[Found] {len(all_csvs)} CSV files total.")
+    outputs: list[str] = []
+
+    for csv_path in all_csvs:
+        result = process_csv(
+            csv_path,
+            text_column=text_column,
+            model_name=model_name,
+            batch_size=batch_size,
+            max_length=max_length,
+            pca_dim=pca_dim,
+            min_k=min_k,
+            max_k=max_k,
+            k_step=k_step,
+            sample_size=sample_size,
+            cluster_batch_size=cluster_batch_size,
+            random_state=random_state,
+        )
+        if result:
+            outputs.append(result)
+
+    return outputs
