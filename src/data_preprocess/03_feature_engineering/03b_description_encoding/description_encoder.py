@@ -27,16 +27,17 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 DEFAULT_MODEL_NAME = "prajjwal1/bert-tiny"
 DEFAULT_TEXT_COLUMN = "Transaction Description"
 DEFAULT_RAW_ROOT = "/home/ubuntu/data_unzipped"
+DEFAULT_CLUSTER_COUNT = 60
 
 __all__ = [
     "DEFAULT_MODEL_NAME",
     "DEFAULT_TEXT_COLUMN",
     "DEFAULT_RAW_ROOT",
+    "DEFAULT_CLUSTER_COUNT",
     "get_device",
     "mean_pool",
     "encode_texts",
     "reduce_pca",
-    "heuristic_k",
     "process_csv",
     "run_pipeline",
 ]
@@ -102,36 +103,6 @@ def reduce_pca(
     return reducer.fit_transform(vectors)
 
 
-def heuristic_k(
-    vectors: np.ndarray,
-    *,
-    min_k: int = 10,
-    max_k: int = 60,
-    step: int = 10,
-    sample_size: int = 10_000,
-    random_state: int = 42,
-) -> int:
-    sample_size = min(sample_size, len(vectors))
-    sample_idx = np.random.default_rng(random_state).choice(len(vectors), sample_size, replace=False)
-    sample = vectors[sample_idx]
-    print(f"[Auto-K] Searching between {min_k}-{max_k}")
-
-    scores: list[tuple[int, float]] = []
-    for k in range(min_k, max_k + 1, step):
-        km = MiniBatchKMeans(
-            n_clusters=k,
-            random_state=random_state,
-            batch_size=2048,
-            n_init="auto",
-        )
-        km.fit(sample)
-        scores.append((k, km.inertia_))
-
-    best_k = min(scores, key=lambda item: item[1])[0]
-    print(f"[Best K] {best_k}")
-    return best_k
-
-
 def _resolve_output_path(file_path: str) -> str:
     if "/processed/" in file_path:
         return file_path.replace("/processed/", "/clustered_out/")
@@ -150,12 +121,13 @@ def process_csv(
     batch_size: int = 64,
     max_length: int = 64,
     pca_dim: int = 20,
-    min_k: int = 10,
-    max_k: int = 60,
-    k_step: int = 10,
-    sample_size: int = 10_000,
+    min_k: int | None = None,  # Deprecated: retained for CLI compatibility
+    max_k: int | None = None,  # Deprecated: retained for CLI compatibility
+    k_step: int | None = None,  # Deprecated: retained for CLI compatibility
+    sample_size: int | None = None,  # Deprecated: retained for CLI compatibility
     cluster_batch_size: int = 4096,
     random_state: int = 42,
+    cluster_count: int = DEFAULT_CLUSTER_COUNT,
 ) -> str | None:
     try:
         df = pd.read_csv(file_path)
@@ -179,17 +151,10 @@ def process_csv(
         max_length=max_length,
     )
     reduced = reduce_pca(embeddings, dim=pca_dim, random_state=random_state)
-    best_k = heuristic_k(
-        reduced,
-        min_k=min_k,
-        max_k=max_k,
-        step=k_step,
-        sample_size=sample_size,
-        random_state=random_state,
-    )
+    effective_k = cluster_count or DEFAULT_CLUSTER_COUNT
 
     km = MiniBatchKMeans(
-        n_clusters=best_k,
+        n_clusters=effective_k,
         random_state=random_state,
         batch_size=cluster_batch_size,
         n_init="auto",
@@ -211,12 +176,13 @@ def run_pipeline(
     batch_size: int = 64,
     max_length: int = 64,
     pca_dim: int = 20,
-    min_k: int = 10,
-    max_k: int = 60,
-    k_step: int = 10,
-    sample_size: int = 10_000,
+    min_k: int | None = None,
+    max_k: int | None = None,
+    k_step: int | None = None,
+    sample_size: int | None = None,
     cluster_batch_size: int = 4096,
     random_state: int = 42,
+    cluster_count: int = DEFAULT_CLUSTER_COUNT,
 ) -> list[str]:
     all_csvs: list[str] = []
     for root, _, files in os.walk(raw_root):
@@ -241,6 +207,7 @@ def run_pipeline(
             sample_size=sample_size,
             cluster_batch_size=cluster_batch_size,
             random_state=random_state,
+            cluster_count=cluster_count,
         )
         if result:
             outputs.append(result)
