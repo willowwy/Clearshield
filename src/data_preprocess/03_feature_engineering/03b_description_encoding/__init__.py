@@ -2,11 +2,11 @@
 
 from .description_encoder import (
     DEFAULT_MODEL_NAME,
+    DEFAULT_CLUSTER_COUNT,
     DEFAULT_RAW_ROOT,
     DEFAULT_TEXT_COLUMN,
     encode_texts,
     get_device,
-    heuristic_k,
     mean_pool,
     process_csv,
     reduce_pca,
@@ -15,11 +15,11 @@ from .description_encoder import (
 
 __all__ = [
     "DEFAULT_MODEL_NAME",
+    "DEFAULT_CLUSTER_COUNT",
     "DEFAULT_RAW_ROOT",
     "DEFAULT_TEXT_COLUMN",
     "encode_texts",
     "get_device",
-    "heuristic_k",
     "mean_pool",
     "process_csv",
     "reduce_pca",
