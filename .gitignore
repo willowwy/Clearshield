@@ -9,3 +9,5 @@ data/processed/*
 data/external/*
 data/cleaned/*
 data/
+data1/
+.gitignore

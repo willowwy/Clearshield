@@ -46,7 +46,7 @@ def reorganize_by_member(input_dir, output_dir, chunksize):
     print("Sorting files...")
 
     for i, member_file in enumerate(list(member_files_created), 1):
-        if i % 100 == 0:
+        if i % 1000 == 0:
             print(f"  Sorted {i}/{len(member_files_created)} files")
         try:
             df = pd.read_csv(member_file, low_memory=False)
@@ -253,7 +253,7 @@ def process_member_files_for_fraud(member_dir, output_dir, min_history_length=No
     summary_records = []
 
     for i, member_file in enumerate(member_files, 1):
-        if i % 100 == 0:
+        if i % 1000 == 0:
             print(f"  Processed {i}/{len(member_files)} members")
         try:
             df = pd.read_csv(member_file, low_memory=False)
