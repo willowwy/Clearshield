@@ -172,7 +172,7 @@ class TransactionPreprocessor:
         for col in self.categorical_features:
             df_transformed[col] = df_transformed[col].fillna('Unknown')
 
-        # Encode 03_feature_engineering
+        # Encode 02_feature_engineering
         encoded_features = []
         for col in self.categorical_features:
             le = self.label_encoders[col]
@@ -187,7 +187,7 @@ class TransactionPreprocessor:
 
         X_encoded = np.column_stack(encoded_features)
 
-        # Scale 03_feature_engineering
+        # Scale 02_feature_engineering
         X_scaled = self.scaler.transform(X_encoded)
 
         # Predict clusters

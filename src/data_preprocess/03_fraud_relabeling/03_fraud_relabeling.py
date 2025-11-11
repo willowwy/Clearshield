@@ -5,8 +5,8 @@ from glob import glob
 from datetime import timedelta
 
 # Configuration
-INPUT_DIR = '../../../data/cleaned1'
-OUTPUT_MEMBER_DIR = '../../../data/by_member1'
+INPUT_DIR = '../../../data/clustered_out'
+OUTPUT_MEMBER_DIR = '../../../data/by_member'
 OUTPUT_PROCESSED_DIR = '../../../data/processed'
 CHUNKSIZE = 50000
 MIN_HISTORY_LENGTH = 10  # Minimum number of transactions required

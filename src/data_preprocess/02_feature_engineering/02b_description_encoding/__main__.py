@@ -1,4 +1,4 @@
-"""Module entry point for `python -m ...03b_description_encoding`."""
+"""Module entry point for `python -m ...02b_description_encoding`."""
 
 from .run_pipeline import main
 

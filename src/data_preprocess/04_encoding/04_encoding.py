@@ -4,8 +4,9 @@ import glob
 import os
 
 # Configuration
-PROCESSED_DIR = '../../data/processed'
-CONFIG_PATH = '../../config/tokenize_dict.json' #json cnofig
+PROCESSED_DIR = '../../../data/processed'
+OUTPUT_DIR = '../../../data/final'
+CONFIG_PATH = '../../../config/tokenize_dict.json' #json cnofig
 CAT_FEATURES = ["Account Type", "Action Type", "Source Type", "Product ID"]
 
 
@@ -24,22 +25,26 @@ def parse_post_time(time_str):
         return 0.0
 
 
-def encode_features(processed_dir=None, config_path=None):
+def encode_features(processed_dir=None, output_dir=None, config_path=None):
     """Encode categorical features in processed member files
 
     Args:
         processed_dir: Directory containing matched/unmatched/no_fraud folders
+        output_dir: Directory to save encoded files (default: data/final)
         config_path: Path to tokenize_dict.json
     """
     if processed_dir is None:
         processed_dir = PROCESSED_DIR
+    if output_dir is None:
+        output_dir = OUTPUT_DIR
     if config_path is None:
         config_path = CONFIG_PATH
 
     print("=" * 60)
     print("FEATURE ENCODING")
     print("=" * 60)
-    print(f"Processed Dir: {processed_dir}")
+    print(f"Input Dir: {processed_dir}")
+    print(f"Output Dir: {output_dir}")
     print(f"Config Path: {config_path}\n")
 
     # Load encoding dictionary
@@ -57,10 +62,14 @@ def encode_features(processed_dir=None, config_path=None):
 
     for subfolder in subfolders:
         subfolder_path = os.path.join(processed_dir, subfolder)
+        output_subfolder_path = os.path.join(output_dir, subfolder)
 
         if not os.path.exists(subfolder_path):
             print(f"\nWarning: {subfolder_path} does not exist, skipping...")
             continue
+
+        # Create output directory if it doesn't exist
+        os.makedirs(output_subfolder_path, exist_ok=True)
 
         csv_files = glob.glob(os.path.join(subfolder_path, "member_*.csv"))
 
@@ -117,8 +126,9 @@ def encode_features(processed_dir=None, config_path=None):
                     "Account Type_enc": 0
                 }, inplace=True)
 
-                # Save processed file
-                df.to_csv(file, index=False, encoding="utf-8-sig")
+                # Save processed file to output directory
+                output_file = os.path.join(output_subfolder_path, os.path.basename(file))
+                df.to_csv(output_file, index=False, encoding="utf-8-sig")
                 total_processed += 1
 
             except Exception as e:
@@ -138,7 +148,7 @@ def encode_features(processed_dir=None, config_path=None):
 
 def main():
     """Main execution function"""
-    encode_features(PROCESSED_DIR, CONFIG_PATH)
+    encode_features(PROCESSED_DIR, OUTPUT_DIR, CONFIG_PATH)
 
 
 if __name__ == "__main__":

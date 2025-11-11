@@ -168,10 +168,10 @@ def process_csv(
     n_samples = len(reduced)
     effective_k = cluster_count or DEFAULT_CLUSTER_COUNT
     if n_samples < effective_k:
-        print(
-            f"[Adjust] {file_path}: requested {effective_k} clusters but only "
-            f"{n_samples} samples; using {n_samples} clusters instead."
-        )
+        # print(
+        #     f"[Adjust] {file_path}: requested {effective_k} clusters but only "
+        #     f"{n_samples} samples; using {n_samples} clusters instead."
+        # )
         effective_k = max(1, n_samples)
 
     km = MiniBatchKMeans(

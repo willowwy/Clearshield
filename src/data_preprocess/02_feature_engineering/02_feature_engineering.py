@@ -3,7 +3,7 @@
 Feature engineering pipeline entry point.
 
 This module serves as the main entry point for the feature engineering pipeline,
-wrapping the description encoding workflow from 03b_description_encoding.
+wrapping the description encoding workflow from 02b_description_encoding.
 """
 
 from __future__ import annotations
@@ -28,12 +28,12 @@ CLUSTER_BATCH_SIZE = 4096
 RANDOM_STATE = 42
 
 
-def run_stage3(processed_dir=None, model_name=None, text_column=None,
+def run_stage2(processed_dir=None, model_name=None, text_column=None,
                batch_size=None, max_length=None, pca_dim=None,
                min_k=None, max_k=None, k_step=None, sample_size=None,
                cluster_batch_size=None, random_state=None, verbose=True):
     """
-    Run Stage 3: Description Encoding and Clustering
+    Run Stage 2: Description Encoding and Clustering
 
     This function processes CSV files in the processed directory structure,
     encodes transaction descriptions using BERT, performs PCA dimensionality
@@ -73,7 +73,7 @@ def run_stage3(processed_dir=None, model_name=None, text_column=None,
 
     if verbose:
         print("=" * 60)
-        print("STAGE 3: DESCRIPTION ENCODING AND CLUSTERING")
+        print("STAGE 2: DESCRIPTION ENCODING AND CLUSTERING")
         print("=" * 60)
         print(f"Input: {processed_dir}")
         print(f"Model: {model_name}")
@@ -83,7 +83,7 @@ def run_stage3(processed_dir=None, model_name=None, text_column=None,
         print("")
 
     # Dynamically import the description_encoder module
-    module_path = Path(__file__).parent / "03b_description_encoding" / "description_encoder.py"
+    module_path = Path(__file__).parent / "02b_description_encoding" / "description_encoder.py"
     spec = importlib.util.spec_from_file_location("description_encoder", module_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load module from {module_path}")
@@ -110,7 +110,7 @@ def run_stage3(processed_dir=None, model_name=None, text_column=None,
 
     if verbose:
         print("\n" + "=" * 60)
-        print("STAGE 3 COMPLETE")
+        print("STAGE 2 COMPLETE")
         print("=" * 60)
         print(f"Processed {len(outputs)} files")
         print(f"Output location: {processed_dir.replace('/processed/', '/clustered_out/')}")
@@ -124,7 +124,7 @@ def main() -> None:
 
     Currently runs the description encoding and clustering pipeline.
     """
-    run_stage3(verbose=True)
+    run_stage2(verbose=True)
 
 
 if __name__ == "__main__":
