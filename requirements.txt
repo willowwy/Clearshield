@@ -1,0 +1,11 @@
+pandas>=2.0
+numpy>=1.24,<2.0
+scikit-learn>=1.3
+torch>=2.2
+transformers>=4.38
+tqdm>=4.65
+safetensors>=0.4.3
+scipy>=1.7,<1.14
+fsspec>=2024.6.1,<2024.6.2
+packaging>=20,<25
+ipython>=8.13,<9.0,!=8.17.1

@@ -24,7 +24,7 @@ from tqdm import tqdm
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-DEFAULT_MODEL_NAME = "prajjwal1/bert-tiny"
+DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_TEXT_COLUMN = "Transaction Description"
 DEFAULT_RAW_ROOT = "/home/ubuntu/data_unzipped"
 DEFAULT_CLUSTER_COUNT = 60
@@ -73,7 +73,16 @@ def encode_texts(
     device = get_device()
     print(f"[Device] Using {device}")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModel.from_pretrained(model_name).to(device).eval()
+    try:
+        model = AutoModel.from_pretrained(
+            model_name,
+            use_safetensors=True,
+        ).to(device).eval()
+    except OSError as exc:
+        raise RuntimeError(
+            f"Model '{model_name}' does not provide safetensors weights. "
+            "Select a safetensors-enabled model or upgrade torch to >=2.6."
+        ) from exc
 
     embeddings: list[np.ndarray] = []
     with torch.no_grad():
@@ -98,19 +107,24 @@ def reduce_pca(
     *,
     random_state: int = 42,
 ) -> np.ndarray:
-    print(f"[PCA] Reducing to {dim} dimensions...")
-    reducer = PCA(n_components=dim, random_state=random_state)
+    n_samples, n_features = vectors.shape
+    effective_dim = min(dim, n_samples, n_features)
+    if effective_dim < dim:
+        print(
+            f"[Adjust][PCA] Requested {dim} dimensions but only "
+            f"{n_samples} samples and {n_features} features; "
+            f"using {effective_dim} components."
+        )
+    if effective_dim < 1:
+        raise ValueError("Cannot perform PCA with fewer than 1 component.")
+
+    print(f"[PCA] Reducing to {effective_dim} dimensions...")
+    reducer = PCA(n_components=effective_dim, random_state=random_state)
     return reducer.fit_transform(vectors)
 
 
 def _resolve_output_path(file_path: str) -> str:
-    if "/processed/" in file_path:
-        return file_path.replace("/processed/", "/clustered_out/")
-    if "/raw/" in file_path:
-        return file_path.replace("/raw/", "/clustered_out/")
-
-    path = Path(file_path)
-    return str(path.parent / "clustered_out" / path.name)
+    return file_path
 
 
 def process_csv(
@@ -151,7 +165,14 @@ def process_csv(
         max_length=max_length,
     )
     reduced = reduce_pca(embeddings, dim=pca_dim, random_state=random_state)
+    n_samples = len(reduced)
     effective_k = cluster_count or DEFAULT_CLUSTER_COUNT
+    if n_samples < effective_k:
+        print(
+            f"[Adjust] {file_path}: requested {effective_k} clusters but only "
+            f"{n_samples} samples; using {n_samples} clusters instead."
+        )
+        effective_k = max(1, n_samples)
 
     km = MiniBatchKMeans(
         n_clusters=effective_k,

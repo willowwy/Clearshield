@@ -15,7 +15,7 @@ from pathlib import Path
 
 # Configuration - can be modified from external scripts
 PROCESSED_DIR = '../../../data/processed'
-MODEL_NAME = 'prajjwal1/bert-tiny'
+MODEL_NAME = 'sentence-transformers/all-MiniLM-L6-v2'
 TEXT_COLUMN = 'Transaction Description'
 BATCH_SIZE = 64
 MAX_LENGTH = 64
