@@ -102,27 +102,48 @@ The preprocessing pipeline consists of 4 sequential stages:
 1. **Clone the repository**
 
 ```bash
-   git clone <repository-url>
-   cd ClearShield
+git clone <repository-url>
+cd ClearShield
 ```
 
-2. **Set up virtual environment**
+2. **Set up environment**
 
 ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   pip install -r requirements.txt
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+python setup.py            # Creates directories and installs dependencies
+```
+
+Or use Makefile:
+```bash
+make setup
 ```
 
 3. **Run the preprocessing pipeline**
 
+**Option A: Automated Script (Recommended)**
+```bash
+cd src/data_preprocess
+python run_pipeline.py
+```
+
+Or using Makefile:
+```bash
+make run
+```
+
+Advanced usage:
+```bash
+python run_pipeline.py --help                    # Show all options
+python run_pipeline.py --skip-cleaning           # Skip data cleaning
+python run_pipeline.py --min-history 15          # Set minimum history to 15
+```
+
+**Option B: Jupyter Notebook (For exploration)**
 - Open `src/data_preprocess/pipeline.ipynb`
-- Execute cells sequentially to run the complete 4-stage pipeline:
-  - Step 1: Data Cleaning
-  - Step 2: Feature Engineering (BERT encoding + clustering)
-  - Step 3: Fraud Matching and Re-labeling
-  - Step 4: Feature Encoding
-- Final datasets will be in `data/final/`
+- Execute cells sequentially to run the complete 4-stage pipeline
+
+**Final datasets** will be in `data/final/[matched|unmatched|no_fraud]/`
 
 4. **Train models**
 

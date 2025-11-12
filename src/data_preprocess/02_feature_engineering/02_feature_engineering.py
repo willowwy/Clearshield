@@ -93,6 +93,7 @@ def run_stage2(processed_dir=None, model_name=None, text_column=None,
     spec.loader.exec_module(desc_encoder)
 
     # Call the run_pipeline function with configuration
+    # Note: description_encoder uses cluster_count instead of min_k/max_k/k_step
     outputs = desc_encoder.run_pipeline(
         raw_root=processed_dir,
         model_name=model_name,
@@ -100,12 +101,9 @@ def run_stage2(processed_dir=None, model_name=None, text_column=None,
         batch_size=batch_size,
         max_length=max_length,
         pca_dim=pca_dim,
-        min_k=min_k,
-        max_k=max_k,
-        k_step=k_step,
-        sample_size=sample_size,
         cluster_batch_size=cluster_batch_size,
         random_state=random_state,
+        cluster_count=max_k,
     )
 
     if verbose:
