@@ -24,14 +24,17 @@ from tqdm import tqdm
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_TEXT_COLUMN = "Transaction Description"
-DEFAULT_RAW_ROOT = "/home/ubuntu/data_unzipped"
+DEFAULT_RAW_ROOT = PROJECT_ROOT / "data" / "cleaned"
+DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "data" / "clustered_out"
 DEFAULT_CLUSTER_COUNT = 60
 
 __all__ = [
     "DEFAULT_MODEL_NAME",
     "DEFAULT_TEXT_COLUMN",
+    "DEFAULT_OUTPUT_ROOT",
     "DEFAULT_RAW_ROOT",
     "DEFAULT_CLUSTER_COUNT",
     "get_device",
@@ -41,6 +44,11 @@ __all__ = [
     "process_csv",
     "run_pipeline",
 ]
+
+
+def _log(message: str, *, verbose: bool = False, always: bool = False) -> None:
+    if always or verbose:
+        print(message)
 
 
 def get_device() -> str:
@@ -69,9 +77,11 @@ def encode_texts(
     model_name: str = DEFAULT_MODEL_NAME,
     batch_size: int = 64,
     max_length: int = 64,
+    verbose: bool = True,
+    show_progress: bool = True,
 ) -> np.ndarray:
     device = get_device()
-    print(f"[Device] Using {device}")
+    _log(f"[Device] Using {device}", verbose=verbose)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     try:
         model = AutoModel.from_pretrained(
@@ -86,7 +96,10 @@ def encode_texts(
 
     embeddings: list[np.ndarray] = []
     with torch.no_grad():
-        for batch in tqdm(_batched(texts, batch_size), desc="Encoding"):
+        iterator: Iterable[list[str]] = _batched(texts, batch_size)
+        if show_progress:
+            iterator = tqdm(iterator, desc="Encoding", leave=False)
+        for batch in iterator:
             encoded = tokenizer(
                 batch,
                 padding=True,
@@ -106,25 +119,39 @@ def reduce_pca(
     dim: int = 20,
     *,
     random_state: int = 42,
+    verbose: bool = True,
 ) -> np.ndarray:
     n_samples, n_features = vectors.shape
     effective_dim = min(dim, n_samples, n_features)
     if effective_dim < dim:
-        print(
+        _log(
             f"[Adjust][PCA] Requested {dim} dimensions but only "
             f"{n_samples} samples and {n_features} features; "
-            f"using {effective_dim} components."
+            f"using {effective_dim} components.",
+            verbose=verbose,
         )
     if effective_dim < 1:
         raise ValueError("Cannot perform PCA with fewer than 1 component.")
 
-    print(f"[PCA] Reducing to {effective_dim} dimensions...")
+    _log(f"[PCA] Reducing to {effective_dim} dimensions...", verbose=verbose)
     reducer = PCA(n_components=effective_dim, random_state=random_state)
     return reducer.fit_transform(vectors)
 
 
-def _resolve_output_path(file_path: str) -> str:
-    return file_path
+def _resolve_output_path(
+    file_path: str | Path,
+    *,
+    raw_root: str | Path = DEFAULT_RAW_ROOT,
+    output_root: str | Path = DEFAULT_OUTPUT_ROOT,
+) -> Path:
+    source = Path(file_path)
+    raw_root_path = Path(raw_root)
+    output_root_path = Path(output_root)
+    try:
+        relative = source.relative_to(raw_root_path)
+    except ValueError:
+        relative = source.name
+    return output_root_path / relative
 
 
 def process_csv(
@@ -135,27 +162,27 @@ def process_csv(
     batch_size: int = 64,
     max_length: int = 64,
     pca_dim: int = 20,
-    min_k: int | None = None,  # Deprecated: retained for CLI compatibility
-    max_k: int | None = None,  # Deprecated: retained for CLI compatibility
-    k_step: int | None = None,  # Deprecated: retained for CLI compatibility
-    sample_size: int | None = None,  # Deprecated: retained for CLI compatibility
     cluster_batch_size: int = 4096,
     random_state: int = 42,
     cluster_count: int = DEFAULT_CLUSTER_COUNT,
+    raw_root: str | Path = DEFAULT_RAW_ROOT,
+    output_root: str | Path = DEFAULT_OUTPUT_ROOT,
+    verbose: bool = True,
+    show_progress: bool = True,
 ) -> str | None:
     try:
         df = pd.read_csv(file_path)
     except Exception as exc:
-        print(f"[Skip] Cannot read {file_path}: {exc}")
+        _log(f"[Skip] Cannot read {file_path}: {exc}", always=True)
         return None
 
     if text_column not in df.columns:
-        print(f"[Skip] Missing column '{text_column}' in {file_path}")
+        _log(f"[Skip] Missing column '{text_column}' in {file_path}", always=True)
         return None
 
     texts = df[text_column].fillna("").astype(str).tolist()
     if not texts:
-        print(f"[Skip] Empty text column in {file_path}")
+        _log(f"[Skip] Empty text column in {file_path}", always=True)
         return None
 
     embeddings = encode_texts(
@@ -163,15 +190,18 @@ def process_csv(
         model_name=model_name,
         batch_size=batch_size,
         max_length=max_length,
+        verbose=verbose,
+        show_progress=show_progress,
     )
-    reduced = reduce_pca(embeddings, dim=pca_dim, random_state=random_state)
+    reduced = reduce_pca(
+        embeddings,
+        dim=pca_dim,
+        random_state=random_state,
+        verbose=verbose,
+    )
     n_samples = len(reduced)
     effective_k = cluster_count or DEFAULT_CLUSTER_COUNT
     if n_samples < effective_k:
-        # print(
-        #     f"[Adjust] {file_path}: requested {effective_k} clusters but only "
-        #     f"{n_samples} samples; using {n_samples} clusters instead."
-        # )
         effective_k = max(1, n_samples)
 
     km = MiniBatchKMeans(
@@ -182,36 +212,39 @@ def process_csv(
     )
     df["cluster_id"] = km.fit_predict(reduced)
 
-    output_path = _resolve_output_path(file_path)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    output_path = _resolve_output_path(
+        file_path,
+        raw_root=raw_root,
+        output_root=output_root,
+    )
+    os.makedirs(output_path.parent, exist_ok=True)
     df.to_csv(output_path, index=False)
-    print(f"[Saved] {output_path}")
-    return output_path
+    _log(f"[Saved] {output_path}", verbose=verbose)
+    return str(output_path)
 
 
 def run_pipeline(
-    raw_root: str = DEFAULT_RAW_ROOT,
+    raw_root: str | Path = DEFAULT_RAW_ROOT,
     *,
+    output_root: str | Path = DEFAULT_OUTPUT_ROOT,
     model_name: str = DEFAULT_MODEL_NAME,
     text_column: str = DEFAULT_TEXT_COLUMN,
     batch_size: int = 64,
     max_length: int = 64,
     pca_dim: int = 20,
-    min_k: int | None = None,
-    max_k: int | None = None,
-    k_step: int | None = None,
-    sample_size: int | None = None,
     cluster_batch_size: int = 4096,
     random_state: int = 42,
     cluster_count: int = DEFAULT_CLUSTER_COUNT,
+    verbose: bool = False,
+    show_progress: bool = True,
 ) -> list[str]:
-    all_csvs: list[str] = []
-    for root, _, files in os.walk(raw_root):
-        for name in files:
-            if name.endswith(".csv"):
-                all_csvs.append(os.path.join(root, name))
-
-    print(f"[Found] {len(all_csvs)} CSV files total.")
+    raw_root_path = Path(raw_root)
+    output_root_path = Path(output_root)
+    all_csvs = sorted(str(path) for path in raw_root_path.rglob("*.csv"))
+    _log(
+        f"[Scan] Found {len(all_csvs)} CSV file(s) in {raw_root_path}",
+        always=True,
+    )
     outputs: list[str] = []
 
     for csv_path in all_csvs:
@@ -222,15 +255,19 @@ def run_pipeline(
             batch_size=batch_size,
             max_length=max_length,
             pca_dim=pca_dim,
-            min_k=min_k,
-            max_k=max_k,
-            k_step=k_step,
-            sample_size=sample_size,
             cluster_batch_size=cluster_batch_size,
             random_state=random_state,
             cluster_count=cluster_count,
+            raw_root=raw_root_path,
+            output_root=output_root_path,
+            verbose=verbose,
+            show_progress=show_progress,
         )
         if result:
             outputs.append(result)
 
+    _log(
+        f"[Done] Saved {len(outputs)} clustered file(s) to {output_root_path}",
+        always=True,
+    )
     return outputs

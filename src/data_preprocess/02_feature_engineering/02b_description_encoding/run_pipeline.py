@@ -1,131 +1,229 @@
 #!/usr/bin/env python3
 """
-End-to-end CLI for the description clustering workflow.
+Global clustering pipeline for transaction descriptions.
 
-It scans a root directory for CSV files, encodes transaction descriptions
-with BERT-tiny, reduces vectors with PCA, auto-selects the cluster count,
-and writes mirrored outputs that include a `cluster_id` column.
+This script aggregates every CSV under `data/cleaned`, encodes the
+transaction descriptions once, discovers a global cluster count, and
+writes clustered files plus a short summary to `data/clustered_out`.
 """
 
 from __future__ import annotations
 
-import argparse
-import sys
 from pathlib import Path
+from typing import Iterable
 
-try:
+import numpy as np
+import pandas as pd
+from sklearn.cluster import MiniBatchKMeans
+
+try:  # Prefer relative imports when executed as a module.
     from .description_encoder import (
         DEFAULT_MODEL_NAME,
+        DEFAULT_OUTPUT_ROOT,
         DEFAULT_RAW_ROOT,
         DEFAULT_TEXT_COLUMN,
-        run_pipeline,
+        encode_texts,
+        reduce_pca,
     )
-except ImportError:  # Allows running as a stand-alone script
-    current_dir = Path(__file__).resolve().parent
-    if str(current_dir) not in sys.path:
-        sys.path.insert(0, str(current_dir))
+except ImportError:  # pragma: no cover - fallback for `python run_pipeline.py`
+    import sys
+
+    CURRENT_DIR = Path(__file__).resolve().parent
+    if str(CURRENT_DIR) not in sys.path:
+        sys.path.append(str(CURRENT_DIR))
     from description_encoder import (  # type: ignore
         DEFAULT_MODEL_NAME,
+        DEFAULT_OUTPUT_ROOT,
         DEFAULT_RAW_ROOT,
         DEFAULT_TEXT_COLUMN,
-        run_pipeline,
+        encode_texts,
+        reduce_pca,
     )
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Encode transaction descriptions with BERT-tiny, perform PCA, and cluster with MiniBatchKMeans.",
+def heuristic_k(
+    vectors: np.ndarray,
+    min_k: int = 10,
+    max_k: int = 60,
+    step: int = 10,
+    *,
+    sample_size: int = 10_000,
+    random_state: int = 42,
+    verbose: bool = False,
+) -> int:
+    """Pick a cluster count by minimizing inertia over a sampled subset."""
+
+    if len(vectors) == 0:
+        raise ValueError("Cannot estimate clusters with no vectors.")
+
+    rng = np.random.default_rng(random_state)
+    subset_size = min(sample_size, len(vectors))
+    sample_idx = rng.choice(len(vectors), subset_size, replace=False)
+    sample = vectors[sample_idx]
+
+    scores: list[tuple[int, float]] = []
+    for k in range(min_k, max_k + 1, step):
+        km = MiniBatchKMeans(
+            n_clusters=k,
+            random_state=random_state,
+            batch_size=2048,
+            n_init="auto",
+        )
+        km.fit(sample)
+        scores.append((k, km.inertia_))
+
+    best_k = min(scores, key=lambda item: item[1])[0]
+    if verbose:
+        print(f"[Auto-K] Range {min_k}-{max_k}, selected k={best_k}")
+    return best_k
+
+
+def _iter_csv_files(root: Path) -> Iterable[Path]:
+    return sorted(path for path in root.rglob("*.csv") if path.is_file())
+
+
+def run_pipeline(
+    input_root: str | Path = DEFAULT_RAW_ROOT,
+    *,
+    output_root: str | Path = DEFAULT_OUTPUT_ROOT,
+    model_name: str = DEFAULT_MODEL_NAME,
+    text_column: str = DEFAULT_TEXT_COLUMN,
+    batch_size: int = 64,
+    max_length: int = 64,
+    pca_dim: int = 20,
+    min_k: int = 10,
+    max_k: int = 60,
+    k_step: int = 10,
+    random_state: int = 42,
+    verbose: bool = False,
+) -> None:
+    input_root_path = Path(input_root)
+    output_root_path = Path(output_root)
+    csv_files = _iter_csv_files(input_root_path)
+    if not csv_files:
+        print(f"[Abort] No CSV files under {input_root_path}")
+        return
+
+    print(
+        f"[Start] Clustering descriptions from {len(csv_files)} file(s) "
+        f"in {input_root_path}"
     )
-    parser.add_argument(
-        "root",
-        nargs="?",
-        default=DEFAULT_RAW_ROOT,
-        help="Root directory containing CSV files.",
+
+    all_texts: list[str] = []
+    file_lengths: list[int] = []
+    valid_files: list[Path] = []
+    skipped: list[str] = []
+
+    def _note_skip(message: str) -> None:
+        skipped.append(message)
+        print(f"[Skip] {message}")
+
+    for path in csv_files:
+        try:
+            df = pd.read_csv(path)
+        except Exception as exc:
+            _note_skip(f"{path}: read error ({exc})")
+            continue
+
+        if text_column not in df.columns:
+            _note_skip(f"{path}: missing '{text_column}' column")
+            continue
+
+        texts = df[text_column].fillna("").astype(str).tolist()
+        if not texts:
+            _note_skip(f"{path}: empty '{text_column}' column")
+            continue
+
+        all_texts.extend(texts)
+        file_lengths.append(len(texts))
+        valid_files.append(path)
+
+    if not all_texts:
+        print("[Abort] No valid descriptions found.")
+        if skipped:
+            print(f"[Info] Skipped {len(skipped)} file(s).")
+        return
+
+    print(
+        f"[Info] Encoding {len(all_texts)} descriptions from "
+        f"{len(valid_files)} file(s)..."
     )
-    parser.add_argument(
-        "--model-name",
-        default=DEFAULT_MODEL_NAME,
-        help="Hugging Face identifier for the encoder model.",
+    embeddings = encode_texts(
+        all_texts,
+        model_name=model_name,
+        batch_size=batch_size,
+        max_length=max_length,
+        verbose=verbose,
     )
-    parser.add_argument(
-        "--text-column",
-        default=DEFAULT_TEXT_COLUMN,
-        help="Name of the column to encode.",
+    reduced = reduce_pca(
+        embeddings,
+        dim=pca_dim,
+        random_state=random_state,
+        verbose=verbose,
     )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=64,
-        help="Batch size for transformer encoding.",
+    best_k = heuristic_k(
+        reduced,
+        min_k=min_k,
+        max_k=max_k,
+        step=k_step,
+        random_state=random_state,
+        verbose=verbose,
     )
-    parser.add_argument(
-        "--max-length",
-        type=int,
-        default=64,
-        help="Maximum token length for the tokenizer.",
+    km = MiniBatchKMeans(
+        n_clusters=best_k,
+        random_state=random_state,
+        batch_size=4096,
+        n_init="auto",
     )
-    parser.add_argument(
-        "--pca-dim",
-        type=int,
-        default=20,
-        help="Number of PCA dimensions to keep.",
+    cluster_ids = km.fit_predict(reduced)
+
+    offset = 0
+    cluster_summary_records: list[dict[str, str | int]] = []
+    for path, length in zip(valid_files, file_lengths, strict=True):
+        df = pd.read_csv(path).head(length).copy()
+        df["cluster_id"] = cluster_ids[offset : offset + length]
+        offset += length
+
+        relative_path = path.relative_to(input_root_path)
+        out_path = output_root_path / relative_path
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(out_path, index=False)
+
+        for cid, group in df.groupby("cluster_id"):
+            sample_texts = group[text_column].head(3).tolist()
+            cluster_summary_records.append(
+                {
+                    "cluster_id": int(cid),
+                    "file": relative_path.as_posix(),
+                    "count_in_file": int(len(group)),
+                    "sample_descriptions": " | ".join(sample_texts),
+                }
+            )
+
+    summary_df = pd.DataFrame(cluster_summary_records)
+    summary_global = (
+        summary_df.groupby("cluster_id")
+        .agg(
+            count_in_file=("count_in_file", "sum"),
+            sample_descriptions=("sample_descriptions", lambda x: " | ".join(list(x)[:5])),
+        )
+        .reset_index()
+        .sort_values("count_in_file", ascending=False)
     )
-    parser.add_argument(
-        "--min-k",
-        type=int,
-        default=10,
-        help="Minimum number of clusters to evaluate.",
+    output_root_path.mkdir(parents=True, exist_ok=True)
+    summary_path = output_root_path / "cluster_summary.csv"
+    summary_global.to_csv(summary_path, index=False)
+
+    print(
+        f"[Done] Saved {len(valid_files)} clustered file(s) "
+        f"to {output_root_path}. Summary: {summary_path}"
     )
-    parser.add_argument(
-        "--max-k",
-        type=int,
-        default=60,
-        help="Maximum number of clusters to evaluate.",
-    )
-    parser.add_argument(
-        "--k-step",
-        type=int,
-        default=10,
-        help="Step size when scanning for the best cluster count.",
-    )
-    parser.add_argument(
-        "--sample-size",
-        type=int,
-        default=10_000,
-        help="Number of rows sampled when estimating the best cluster count.",
-    )
-    parser.add_argument(
-        "--cluster-batch-size",
-        type=int,
-        default=4096,
-        help="MiniBatchKMeans batch size for the final clustering pass.",
-    )
-    parser.add_argument(
-        "--random-state",
-        type=int,
-        default=42,
-        help="Random seed for deterministic results.",
-    )
-    return parser.parse_args()
+    if skipped:
+        print(f"[Info] Skipped {len(skipped)} file(s); see log above for reasons.")
 
 
 def main() -> None:
-    args = parse_args()
-    outputs = run_pipeline(
-        args.root,
-        model_name=args.model_name,
-        text_column=args.text_column,
-        batch_size=args.batch_size,
-        max_length=args.max_length,
-        pca_dim=args.pca_dim,
-        min_k=args.min_k,
-        max_k=args.max_k,
-        k_step=args.k_step,
-        sample_size=args.sample_size,
-        cluster_batch_size=args.cluster_batch_size,
-        random_state=args.random_state,
-    )
-    print(f"[Done] Wrote {len(outputs)} clustered files.")
+    run_pipeline()
 
 
 if __name__ == "__main__":

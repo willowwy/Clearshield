@@ -3,6 +3,7 @@
 from .description_encoder import (
     DEFAULT_MODEL_NAME,
     DEFAULT_CLUSTER_COUNT,
+    DEFAULT_OUTPUT_ROOT,
     DEFAULT_RAW_ROOT,
     DEFAULT_TEXT_COLUMN,
     encode_texts,
@@ -16,6 +17,7 @@ from .description_encoder import (
 __all__ = [
     "DEFAULT_MODEL_NAME",
     "DEFAULT_CLUSTER_COUNT",
+    "DEFAULT_OUTPUT_ROOT",
     "DEFAULT_RAW_ROOT",
     "DEFAULT_TEXT_COLUMN",
     "encode_texts",
