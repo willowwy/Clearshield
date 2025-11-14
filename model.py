@@ -9,6 +9,10 @@ class TimeCatLSTM(nn.Module):
     def __init__(self, args: argparse.Namespace):
         super().__init__()
 
+        # Embedding dropout
+        self.embedding_dropout = getattr(args, 'embedding_dropout', 0.0)
+        self.emb_dropout = nn.Dropout(self.embedding_dropout) if self.embedding_dropout > 0 else nn.Identity()
+
         # Time embeddings
         self.post_day_emb = nn.Embedding(args.day_vocab, args.day_emb_dim)
         self.post_hour_emb = nn.Embedding(args.hour_vocab, args.hour_emb_dim)
@@ -29,7 +33,7 @@ class TimeCatLSTM(nn.Module):
         # Configure categorical embeddings based on feature names
         if hasattr(args, 'feature_names') and args.feature_names:
             for name in args.feature_names:
-                if name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized"]:
+                if name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized", "cluster_id"]:
                     if name == "Member Age":
                         vocab, emb = 10, 10  # //10 then do embedding
                     elif name == "Amount":
@@ -38,6 +42,8 @@ class TimeCatLSTM(nn.Module):
                         vocab, emb = 2, 4   # Boolean value
                     elif name == "account_age_quantized":
                         vocab, emb = 5, 5   # 5 age stages
+                    elif name == "cluster_id":
+                        vocab, emb = 60, 32  # cluster_id embedding
                     elif "Account Type" in name:
                         vocab, emb = 15, 16
                     elif "Product ID" in name:
@@ -107,7 +113,7 @@ class TimeCatLSTM(nn.Module):
                 debug_info.append(f"  -> Time feature")
                 debug_info.append(f"    Original range: {feature_values.min()} to {feature_values.max()}")
                 debug_info.append(f"    Converted to long: {time_features[name].min()} to {time_features[name].max()}")
-            elif name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized"]:
+            elif name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized", "cluster_id"]:
                 # Ensure categorical features are integers and non-negative
                 # For negative values, we map them to 0
                 clamped_values = torch.clamp(feature_values, min=0).long()
@@ -173,6 +179,8 @@ class TimeCatLSTM(nn.Module):
                 self.post_min_emb(post_time_minute),
                 self.open_day_emb(account_open_doy),
             ], dim=-1).float()  # [B,T,Dt] Ensure float32 type
+            # Apply embedding dropout
+            t_emb = self.emb_dropout(t_emb)
         except Exception as e:
             # Record error information to file
             with open("embedding_error.txt", "a") as f:
@@ -219,6 +227,8 @@ class TimeCatLSTM(nn.Module):
             # Execute embedding
             cat_list = [self.cat_embs[name](final_categorical_features[name]) for name in self.cat_embs]
             c_emb = torch.cat(cat_list, dim=-1).float()  # Ensure float32 type
+            # Apply embedding dropout
+            c_emb = self.emb_dropout(c_emb)
             cont_x = torch.cat(continuous_features, dim=-1) if continuous_features else torch.zeros(x.size(0), x.size(1), 0, device=x.device, dtype=torch.float32)
             x = torch.cat([t_emb, cont_x, c_emb], dim=-1)
         else:
@@ -238,8 +248,213 @@ class TimeCatLSTM(nn.Module):
         return preds
 
 
+class FraudEnc(nn.Module):
+    """Encoder-only Transformer model for fraud detection sequence modeling."""
+    
+    def __init__(self, args: argparse.Namespace):
+        super().__init__()
+        
+        # Embedding dropout
+        self.embedding_dropout = getattr(args, 'embedding_dropout', 0.0)
+        self.emb_dropout = nn.Dropout(self.embedding_dropout) if self.embedding_dropout > 0 else nn.Identity()
+        
+        # Time embeddings
+        self.post_day_emb = nn.Embedding(args.day_vocab, args.day_emb_dim)
+        self.post_hour_emb = nn.Embedding(args.hour_vocab, args.hour_emb_dim)
+        self.post_min_emb = nn.Embedding(args.minute_vocab, args.minute_emb_dim)
+        self.open_day_emb = nn.Embedding(args.aod_day_vocab, args.aod_day_emb_dim)
+        
+        time_total_dim = (
+            args.day_emb_dim
+            + args.hour_emb_dim
+            + args.minute_emb_dim
+            + args.aod_day_emb_dim
+        )
+        
+        # Categorical embeddings - direct configuration
+        self.cat_embs = nn.ModuleDict()
+        cat_total_dim = 0
+        
+        # Configure categorical embeddings based on feature names
+        if hasattr(args, 'feature_names') and args.feature_names:
+            for name in args.feature_names:
+                if name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized", "cluster_id"]:
+                    if name == "Member Age":
+                        vocab, emb = 10, 10
+                    elif name == "Amount":
+                        vocab, emb = 12, 10
+                    elif name == "is_int":
+                        vocab, emb = 2, 4
+                    elif name == "account_age_quantized":
+                        vocab, emb = 5, 5
+                    elif name == "cluster_id":
+                        vocab, emb = 60, 32  # cluster_id embedding
+                    elif "Account Type" in name:
+                        vocab, emb = 15, 16
+                    elif "Product ID" in name:
+                        vocab, emb = 160, 32
+                    elif "Action Type" in name:
+                        vocab, emb = 5, 5
+                    elif "Source Type" in name:
+                        vocab, emb = 20, 16
+
+                    else:
+                        vocab, emb = 50, 4
+                    
+                    self.cat_embs[name] = nn.Embedding(vocab, emb)
+                    cat_total_dim += emb
+        
+        # Total input dimension after embeddings
+        self.input_dim = time_total_dim + cat_total_dim + args.cont_dim
+        
+        # Transformer embedding dimension (can be configured)
+        transformer_dim = getattr(args, 'transformer_dim', args.lstm_hidden if hasattr(args, 'lstm_hidden') else 128)
+        
+        # Input projection to transformer dimension
+        self.input_proj = nn.Linear(self.input_dim, transformer_dim)
+        
+        # Positional embedding (learned)
+        max_seq_len = getattr(args, 'max_seq_len', 512)
+        self.pos_emb = nn.Embedding(max_seq_len, transformer_dim)
+        
+        # Multi-layer Transformer Encoder
+        dim_feedforward = getattr(args, 'dim_feedforward', 0)
+        if dim_feedforward == 0:
+            dim_feedforward = transformer_dim * 2
+        
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=transformer_dim,
+            nhead=getattr(args, 'nhead', 3),
+            dim_feedforward=dim_feedforward,
+            dropout=getattr(args, 'dropout', 0.1),
+            activation=getattr(args, 'activation', 'relu'),
+            batch_first=True,
+            norm_first=getattr(args, 'norm_first', False),
+        )
+        num_encoder_layers = getattr(args, 'num_encoder_layers', 1)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
+        
+        # Prediction head for next-step vector forecasting
+        inferred_pred_dim = getattr(args, 'pred_dim', 0)
+        if not inferred_pred_dim:
+            target_names = getattr(args, 'target_names', []) or []
+            if target_names:
+                inferred_pred_dim = len(target_names)
+            else:
+                inferred_pred_dim = len(getattr(args, 'feature_names', []) or [])
+        self.pred_dim = inferred_pred_dim
+        self.head = nn.Linear(transformer_dim, self.pred_dim)
+        
+        # Store transformer_dim for forward pass
+        self.transformer_dim = transformer_dim
+        
+    def forward(
+        self,
+        x: torch.Tensor,             # [B, T, total_feature_dim]
+        mask: torch.Tensor,          # [B, T]
+        feature_names: list,         # feature names list to split feature types
+        use_pack: bool = True,       # Not used for transformer, kept for compatibility
+    ) -> torch.Tensor:
+        # Separate different types of features from feature names
+        time_features = {}
+        categorical_features = {}
+        continuous_features = []
+        
+        for i, name in enumerate(feature_names):
+            feature_values = x[:, :, i]
+            
+            if name in ["Post Date_doy", "Post Time_hour", "Post Time_minute", "Account Open Date_doy"]:
+                time_features[name] = feature_values.long()
+            elif name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized", "cluster_id"]:
+                clamped_values = torch.clamp(feature_values, min=0).long()
+                categorical_features[name] = clamped_values
+            else:
+                continuous_features.append(x[:, :, i:i+1])
+        
+        # Ensure all time features are non-negative and within valid ranges
+        post_date_doy = torch.clamp(time_features["Post Date_doy"], min=0, max=365)
+        post_time_hour = torch.clamp(time_features["Post Time_hour"], min=0, max=23)
+        post_time_minute = torch.clamp(time_features["Post Time_minute"], min=0, max=59)
+        account_open_doy = torch.clamp(time_features["Account Open Date_doy"], min=0, max=365)
+        
+        # Time embeddings
+        t_emb = torch.cat([
+            self.post_day_emb(post_date_doy),
+            self.post_hour_emb(post_time_hour),
+            self.post_min_emb(post_time_minute),
+            self.open_day_emb(account_open_doy),
+        ], dim=-1).float()  # [B, T, Dt]
+        # Apply embedding dropout
+        t_emb = self.emb_dropout(t_emb)
+        
+        # Categorical embeddings
+        if len(self.cat_embs) > 0 and categorical_features:
+            final_categorical_features = {}
+            for name, values in categorical_features.items():
+                if name in self.cat_embs:
+                    vocab_size = self.cat_embs[name].num_embeddings
+                    final_values = torch.clamp(values, min=0, max=vocab_size-1)
+                    final_categorical_features[name] = final_values
+                else:
+                    final_categorical_features[name] = values
+            
+            cat_list = [self.cat_embs[name](final_categorical_features[name]) for name in self.cat_embs]
+            c_emb = torch.cat(cat_list, dim=-1).float()
+            # Apply embedding dropout
+            c_emb = self.emb_dropout(c_emb)
+            cont_x = torch.cat(continuous_features, dim=-1) if continuous_features else torch.zeros(x.size(0), x.size(1), 0, device=x.device, dtype=torch.float32)
+            x_emb = torch.cat([t_emb, cont_x, c_emb], dim=-1)
+        else:
+            cont_x = torch.cat(continuous_features, dim=-1) if continuous_features else torch.zeros(x.size(0), x.size(1), 0, device=x.device, dtype=torch.float32)
+            x_emb = torch.cat([t_emb, cont_x], dim=-1)
+        
+        # Verify dimension match
+        if x_emb.shape[-1] != self.input_dim:
+            raise RuntimeError(
+                f"Dimension mismatch: x_emb has shape {x_emb.shape} (last dim={x_emb.shape[-1]}), "
+                f"but input_proj expects {self.input_dim}. "
+                f"Time dim: {t_emb.shape[-1]}, Cont dim: {cont_x.shape[-1]}, "
+                f"Cat dim: {c_emb.shape[-1] if len(self.cat_embs) > 0 and categorical_features else 0}, "
+                f"Cat embeddings: {list(self.cat_embs.keys())}, "
+                f"Categorical features found: {list(categorical_features.keys())}, "
+                f"Feature names: {feature_names}"
+            )
+        
+        # Project to transformer dimension
+        x_proj = self.input_proj(x_emb)  # [B, T, transformer_dim]
+        
+        # Add positional embeddings
+        B, T, _ = x_proj.shape
+        positions = torch.arange(0, T, device=x_proj.device).unsqueeze(0).expand(B, -1)  # [B, T]
+        pos_embeddings = self.pos_emb(positions)  # [B, T, transformer_dim]
+        x_with_pos = x_proj + pos_embeddings
+        
+        # Create attention mask: 0 for valid positions, -inf for padding
+        # Transformer expects mask where True means ignore (mask out)
+        # Our mask: 1 = valid, 0 = padding, so we need to invert it
+        attention_mask = (mask == 0).bool()  # [B, T], True where padding
+        
+        # Transformer encoder expects mask of shape [B*num_heads, T, T] or [T, T] or [B, T]
+        # For batch_first=True, we use [B, T] mask which will be expanded internally
+        # Pass None mask (all positions valid) and handle padding in the attention mask
+        
+        # Convert to src_key_padding_mask format: True = ignore
+        src_key_padding_mask = attention_mask  # [B, T]
+        
+        # Pass through transformer encoder
+        out = self.transformer(x_with_pos, src_key_padding_mask=src_key_padding_mask)  # [B, T, transformer_dim]
+        
+        # Prediction head
+        preds = self.head(out)  # [B, T, pred_dim]
+        return preds
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Time+Category Embedding LSTM (binary)")
+    
+    # Model type selection
+    p.add_argument("--model_type", type=str, default="transformer", choices=["lstm", "transformer", "fraudenc"], 
+                   help="Model type: lstm, transformer, or fraudenc")
     
     # Continuous feature dimension (needs to match data)
     p.add_argument("--cont_dim", type=int, default=1, help="Continuous feature dimension")
@@ -268,16 +483,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--lstm_layers", type=int, default=1, help="LSTM layer count")
     p.add_argument("--dropout", type=float, default=0.1, help="Dropout rate")
     p.add_argument("--bidirectional", action="store_true", help="Whether to use bidirectional LSTM")
+    
+    # Transformer (for FraudEnc)
+    p.add_argument("--transformer_dim", type=int, default=128, help="Transformer embedding dimension")
+    p.add_argument("--nhead", type=int, default=8, help="Number of attention heads in transformer")
+    p.add_argument("--num_encoder_layers", type=int, default=3, help="Number of transformer encoder layers")
+    p.add_argument("--dim_feedforward", type=int, default=0, help="Feedforward dimension (0 = 2 * transformer_dim)")
+    p.add_argument("--activation", type=str, default="relu", help="Activation function (relu/gelu)")
+    p.add_argument("--norm_first", action="store_true", help="Apply normalization before attention/ffn (Pre-LN)")
+    p.add_argument("--max_seq_len", type=int, default=512, help="Maximum sequence length for positional embeddings")
 
     # Training related (optional)
     p.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     p.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay")
+    p.add_argument("--embedding_dropout", type=float, default=0, help="Dropout rate for embeddings")
     p.add_argument("--seed", type=int, default=42, help="Random seed")
     return p
 
 
-def build_model(args: argparse.Namespace) -> TimeCatLSTM:
-    return TimeCatLSTM(args)
+def build_model(args: argparse.Namespace):
+    """Build model based on model_type argument."""
+    model_type = getattr(args, 'model_type', 'lstm').lower()
+    if model_type == 'transformer' or model_type == 'fraudenc':
+        return FraudEnc(args)
+    else:
+        return TimeCatLSTM(args)
 
 
 if __name__ == "__main__":

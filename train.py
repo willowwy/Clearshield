@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.cuda.amp import autocast, GradScaler
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
 import time
@@ -15,7 +16,7 @@ import matplotlib.pyplot as plt
 import csv
 import json
 
-from model import TimeCatLSTM, build_arg_parser, build_model
+from model import build_arg_parser, build_model
 from losss import build_loss_from_args
 from datasets import create_dataloader
 
@@ -55,13 +56,15 @@ def _masked_regression_metrics(preds, target, valid_mask):
     """Compute masked MSE/MAE given preds [B,T,D], target [B,T,D], valid_mask [B,T]."""
     m = valid_mask.unsqueeze(-1).to(preds.dtype)
     diff = (preds - target) * m
-    denom = m.sum().clamp_min(1.0)
+    # denom should be the total number of valid elements (B*T*D), not just B*T
+    # m.sum() gives B*T (number of valid time steps), need to multiply by feature dim D
+    denom = (m.sum() * preds.shape[-1]).clamp_min(1.0)
     mse = (diff ** 2).sum() / denom
     mae = diff.abs().sum() / denom
     return mse, mae
 
 
-def train_epoch(model, train_loader, optimizer, criterion, device, feature_names, target_indices, logger):
+def train_epoch(model, train_loader, optimizer, criterion, device, feature_names, target_indices, logger, scaler=None, use_amp=False):
     """Train one epoch"""
     model.train()
     total_loss = 0.0
@@ -83,7 +86,11 @@ def train_epoch(model, train_loader, optimizer, criterion, device, feature_names
             optimizer.zero_grad()
             
             # Forward pass to get sequence predictions [B,T,pred_dim]
-            preds = model(X, mask, feature_names)
+            if use_amp and scaler is not None:
+                with autocast():
+                    preds = model(X, mask, feature_names)
+            else:
+                preds = model(X, mask, feature_names)
             
             # Log model output info (only for first batch)
             if batch_idx == 0:
@@ -99,8 +106,14 @@ def train_epoch(model, train_loader, optimizer, criterion, device, feature_names
                 mse, mae = _masked_regression_metrics(pred_steps, target_steps, valid_steps)
                 loss = mse  # optimize MSE
 
-                loss.backward()
-                optimizer.step()
+                # Backward pass
+                if use_amp and scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    optimizer.step()
 
                 total_loss += loss.item()
                 total_mse += mse.item()
@@ -296,7 +309,7 @@ def train_model(args):
     args.cont_dim = len([f for f in feature_names if f not in [
         'Post Date_doy', 'Post Time_hour', 'Post Time_minute', 'Account Open Date_doy',
         'Account Type_enc', 'Member Age', 'Product ID_enc', 'Amount', 
-        'Action Type_enc', 'Source Type_enc', 'is_int', 'account_age_quantized'
+        'Action Type_enc', 'Source Type_enc', 'is_int', 'account_age_quantized', 'cluster_id'
     ]])
     
     # Resolve target names (subset to predict)
@@ -329,6 +342,16 @@ def train_model(args):
     criterion = build_loss_from_args(args)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     
+    # Mixed precision training setup
+    use_amp = getattr(args, 'use_amp', False) and torch.cuda.is_available()
+    scaler = GradScaler() if use_amp else None
+    if use_amp:
+        print("Using mixed precision training (AMP)")
+        logger.info("Using mixed precision training (AMP)")
+    else:
+        print("Using full precision training")
+        logger.info("Using full precision training")
+    
     # Learning rate scheduler
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=args.patience
@@ -355,7 +378,7 @@ def train_model(args):
         start_time = time.time()
         
         # Training
-        train_loss, train_mse, train_mae = train_epoch(model, train_loader, optimizer, criterion, device, feature_names, target_indices, logger)
+        train_loss, train_mse, train_mae = train_epoch(model, train_loader, optimizer, criterion, device, feature_names, target_indices, logger, scaler=scaler, use_amp=use_amp)
         
         # Validation
         val_loss, val_mse, val_mae = evaluate(model, val_loader, criterion, device, feature_names, target_indices)
@@ -393,7 +416,7 @@ def train_model(args):
                     'val_loss': val_loss,
                     'val_mse': val_mse,
                     'args': args
-                }, os.path.join(args.save_dir, f'best_model.pth'))
+                }, os.path.join(args.save_dir, f'best_model_enc.pth'))
                 print(f"Saved best model with val MSE: {val_mse:.6f}")
         else:
             patience_counter += 1
@@ -528,10 +551,10 @@ def train_model(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train TimeCatLSTM model")
+    parser = argparse.ArgumentParser(description="Train sequence model (LSTM or Transformer)")
     
     # Data related parameters
-    parser.add_argument("--data_dir", type=str, default="no_fraud", help="Data directory")
+    parser.add_argument("--data_dir", type=str, default="final/no_fraud", help="Data directory")
     parser.add_argument("--max_len", type=int, default=50, help="Maximum sequence length")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--train_ratio", type=float, default=0.8, help="Training set ratio")
@@ -544,6 +567,7 @@ def main():
     parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay")
     parser.add_argument("--patience", type=int, default=5, help="Learning rate scheduler patience")
     parser.add_argument("--early_stopping_patience", type=int, default=10, help="Early stopping patience")
+    parser.add_argument("--use_amp", action="store_true", help="Use mixed precision training (AMP)")
     
     # Loss options
     parser.add_argument("--loss_type", type=str, default="huber", choices=["bce", "huber", "pseudohuber", "quantile"], help="Choose loss function")
@@ -559,7 +583,7 @@ def main():
     
     # Sliding window parameters
     parser.add_argument("--use_sliding_window", action="store_true", help="Use sliding window to increase data volume")
-    parser.add_argument("--window_overlap", type=float, default=0.5, help="Sliding window overlap ratio (0.0-0.9)")
+    parser.add_argument("--window_overlap", type=float, default=0.8, help="Sliding window overlap ratio (0.0-0.9)")
     
     # Other parameters
     parser.add_argument("--seed", type=int, default=42, help="Random seed")

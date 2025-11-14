@@ -102,8 +102,8 @@ def _select_csv_files(matched_dir: str, mode: str, train_val_test: tuple[float, 
     n_test = n - n_train - n_val
 
     train_idx = indices[:n_train]
-    val_idx = indices[n_train:n_train + n_test]
-    test_idx = indices[n_train + n_test:]
+    val_idx = indices[n_train:n_train + n_val]
+    test_idx = indices[n_train + n_val:]
 
     if mode == "train":
         chosen = train_idx
@@ -406,7 +406,7 @@ class CSVConsistentBatchSampler:
 
 
 # Public API to build DataLoader from matched CSVs
-def create_dataloader(matched_dir: str = "no_fraud", max_len: int = 50, batch_size: int = 32, shuffle: bool = True, mode: str = "train", split: tuple[float, float, float] = (0.8, 0.1, 0.1), seed: int = 42, drop_all_zero_batches: bool = True, use_sliding_window: bool = False, window_overlap: float = 0.5):
+def create_dataloader(matched_dir: str = "clustered_out/no_fraud", max_len: int = 50, batch_size: int = 32, shuffle: bool = True, mode: str = "train", split: tuple[float, float, float] = (0.8, 0.1, 0.1), seed: int = 42, drop_all_zero_batches: bool = True, use_sliding_window: bool = False, window_overlap: float = 0.5):
     """
     Create data loader with sliding window support to enhance data utilization efficiency
     
@@ -466,7 +466,7 @@ if __name__ == "__main__":
         for config in configs:
             print(f"\n--- {config['name']} ---")
             loader, feature_names = create_dataloader(
-                matched_dir="no_fraud",
+                matched_dir="clustered_out/no_fraud",
                 max_len=50,
                 batch_size=32,
                 shuffle=True,
