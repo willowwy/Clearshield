@@ -3,7 +3,10 @@ User guide:
 
 run
 
-python eval.py --model_path checkpoints/best_model.pth --data_dir {data_dir_with_matched_fraud}
+python eval.py \
+--model_path models/best_model_enc.pth \
+--data_dir {data_dir_with_matched_fraud}  \
+--save_dir {.}
 
 after putting precessed csv files in data/precessed/ and model in checkpoints
 
@@ -28,6 +31,112 @@ from src.models.backbone_model import build_arg_parser, build_model
 from src.models.datasets import create_dataloader
 
 
+def count_parameters(model):
+    """Count model parameters"""
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return total_params, trainable_params
+
+
+def print_model_hyperparameters(args):
+    """Print model hyperparameters in a structured format"""
+    print("\n" + "="*60)
+    print("Model Hyperparameters")
+    print("="*60)
+    
+    # Convert args to dict if it's Namespace
+    if hasattr(args, '__dict__'):
+        args_dict = vars(args)
+    elif isinstance(args, dict):
+        args_dict = args
+    else:
+        args_dict = {}
+    
+    # Model architecture parameters
+    print("\n[Model Architecture]")
+    model_type = args_dict.get('model_type', 'unknown')
+    print(f"  Model Type: {model_type}")
+    
+    if model_type in ['transformer', 'fraudenc']:
+        print(f"  Transformer Dimension: {args_dict.get('transformer_dim', 'N/A')}")
+        print(f"  Number of Attention Heads: {args_dict.get('nhead', 'N/A')}")
+        print(f"  Number of Encoder Layers: {args_dict.get('num_encoder_layers', 'N/A')}")
+        dim_ff = args_dict.get('dim_feedforward', 0)
+        if dim_ff == 0:
+            transformer_dim = args_dict.get('transformer_dim', 128)
+            dim_ff = transformer_dim * 2
+            print(f"  Feedforward Dimension: {dim_ff} (auto: 2 * transformer_dim)")
+        else:
+            print(f"  Feedforward Dimension: {dim_ff}")
+        print(f"  Activation Function: {args_dict.get('activation', 'N/A')}")
+        print(f"  Pre-LN (norm_first): {args_dict.get('norm_first', False)}")
+        print(f"  Max Sequence Length: {args_dict.get('max_seq_len', 'N/A')}")
+    else:
+        print(f"  LSTM Hidden Dimension: {args_dict.get('lstm_hidden', 'N/A')}")
+        print(f"  LSTM Layers: {args_dict.get('lstm_layers', 'N/A')}")
+        print(f"  Bidirectional: {args_dict.get('bidirectional', False)}")
+    
+    print(f"  Dropout Rate: {args_dict.get('dropout', 'N/A')}")
+    print(f"  Embedding Dropout: {args_dict.get('embedding_dropout', 0.0)}")
+    
+    # Embedding parameters
+    print("\n[Embedding Parameters]")
+    print(f"  Day Vocabulary Size: {args_dict.get('day_vocab', 'N/A')}")
+    print(f"  Day Embedding Dim: {args_dict.get('day_emb_dim', 'N/A')}")
+    print(f"  Hour Vocabulary Size: {args_dict.get('hour_vocab', 'N/A')}")
+    print(f"  Hour Embedding Dim: {args_dict.get('hour_emb_dim', 'N/A')}")
+    print(f"  Minute Vocabulary Size: {args_dict.get('minute_vocab', 'N/A')}")
+    print(f"  Minute Embedding Dim: {args_dict.get('minute_emb_dim', 'N/A')}")
+    print(f"  Account Open Date Vocabulary Size: {args_dict.get('aod_day_vocab', 'N/A')}")
+    print(f"  Account Open Date Embedding Dim: {args_dict.get('aod_day_emb_dim', 'N/A')}")
+    print(f"  Continuous Feature Dimension: {args_dict.get('cont_dim', 'N/A')}")
+    
+    # Training parameters
+    print("\n[Training Parameters]")
+    print(f"  Learning Rate: {args_dict.get('lr', 'N/A')}")
+    print(f"  Weight Decay: {args_dict.get('weight_decay', 'N/A')}")
+    print(f"  Batch Size: {args_dict.get('batch_size', 'N/A')}")
+    print(f"  Max Sequence Length: {args_dict.get('max_len', 'N/A')}")
+    print(f"  Random Seed: {args_dict.get('seed', 'N/A')}")
+    
+    # Loss function parameters
+    print("\n[Loss Function Parameters]")
+    loss_type = args_dict.get('loss_type', 'N/A')
+    print(f"  Loss Type: {loss_type}")
+    if loss_type in ['huber', 'pseudohuber']:
+        print(f"  Delta (δ): {args_dict.get('delta', 'N/A')}")
+        auto_delta_p = args_dict.get('auto_delta_p', None)
+        if auto_delta_p is not None:
+            print(f"  Auto Delta P: {auto_delta_p}")
+        column_weights = args_dict.get('column_weights', None)
+        if column_weights:
+            print(f"  Column Weights: {column_weights}")
+        print(f"  Apply Sigmoid: {args_dict.get('apply_sigmoid_in_regression', True)}")
+    elif loss_type == 'quantile':
+        print(f"  Quantiles: {args_dict.get('quantiles', 'N/A')}")
+        print(f"  Crossing Lambda: {args_dict.get('crossing_lambda', 'N/A')}")
+    
+    # Data split parameters
+    print("\n[Data Split Parameters]")
+    print(f"  Train Ratio: {args_dict.get('train_ratio', 'N/A')}")
+    print(f"  Validation Ratio: {args_dict.get('val_ratio', 'N/A')}")
+    print(f"  Test Ratio: {args_dict.get('test_ratio', 'N/A')}")
+    
+    # Target features
+    target_names = args_dict.get('target_names', None)
+    if target_names:
+        print("\n[Target Features]")
+        print(f"  Number of Target Features: {len(target_names)}")
+        print(f"  Target Features: {target_names}")
+    
+    # Feature names
+    feature_names = args_dict.get('feature_names', None)
+    if feature_names:
+        print(f"\n  Total Features: {len(feature_names)}")
+    
+    print("="*60 + "\n")
+
+
 def load_model(model_path, device):
     """Load trained model"""
     print(f"Loading model from: {model_path}")
@@ -44,6 +153,17 @@ def load_model(model_path, device):
     model = build_model(args).to(device)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
+    
+    # Count and display model parameters
+    total_params, trainable_params = count_parameters(model)
+    print(f"\nModel Parameters:")
+    print(f"  Total parameters: {total_params:,}")
+    print(f"  Trainable parameters: {trainable_params:,}")
+    print(f"  Non-trainable parameters: {total_params - trainable_params:,}")
+    print(f"  Model size: {total_params * 4 / 1024 / 1024:.2f} MB (assuming float32)")
+    
+    # Print model hyperparameters
+    print_model_hyperparameters(args)
     
     return model, args
 
@@ -83,7 +203,9 @@ def evaluate_model(model, test_loader, device, feature_names, target_indices, ar
                 # Calculate MSE and MAE
                 m = valid_steps.unsqueeze(-1).to(preds.dtype)
                 diff = (pred_steps - target_steps) * m
-                denom = m.sum().clamp_min(1.0)
+                # denom should be the total number of valid elements (B*T*D), not just B*T
+                # m.sum() gives B*T (number of valid time steps), need to multiply by feature dim D
+                denom = (m.sum() * pred_steps.shape[-1]).clamp_min(1.0)
                 mse = (diff ** 2).sum() / denom
                 mae = diff.abs().sum() / denom
                 loss = mse
@@ -264,9 +386,20 @@ def plot_evaluation_results(results, analysis, target_names, save_dir):
     print(f"Evaluation chart saved to: {plot_path}")
 
 
-def save_evaluation_results(results, analysis, target_names, save_dir):
+def save_evaluation_results(results, analysis, target_names, save_dir, model=None):
     """Save evaluation results to file"""
     os.makedirs(save_dir, exist_ok=True)
+    
+    # Get model parameters if model is provided
+    model_info = {}
+    if model is not None:
+        total_params, trainable_params = count_parameters(model)
+        model_info = {
+            'total_parameters': total_params,
+            'trainable_parameters': trainable_params,
+            'non_trainable_parameters': total_params - trainable_params,
+            'model_size_mb': total_params * 4 / 1024 / 1024
+        }
     
     # Save basic metrics
     basic_results = {
@@ -280,7 +413,8 @@ def save_evaluation_results(results, analysis, target_names, save_dir):
         'feature_mse_by_label': {
             'fraud_0': [float(x) if x == x else None for x in analysis.get('feature_mse_by_label', {}).get(0, [])],
             'fraud_1': [float(x) if x == x else None for x in analysis.get('feature_mse_by_label', {}).get(1, [])]
-        }
+        },
+        'model_info': model_info
     }
     
     # Save to JSON file
@@ -301,6 +435,326 @@ def save_evaluation_results(results, analysis, target_names, save_dir):
     print(f"Results saved to directory: {save_dir}")
 
 
+def _load_tokenize_dict(json_path):
+    if not os.path.exists(json_path):
+        raise FileNotFoundError(f"Tokenize dict json not found: {json_path}")
+    with open(json_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def _compute_cosine_matrix(emb_matrix_np):
+    # emb_matrix_np: [N, D]
+    if emb_matrix_np.size == 0:
+        return np.zeros((0, 0), dtype=np.float32)
+    # Normalize rows
+    norms = np.linalg.norm(emb_matrix_np, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    emb_norm = emb_matrix_np / norms
+    return emb_norm @ emb_norm.T
+
+
+def _plot_cosine_heatmap(cos_mat, labels, title, save_path, max_ticks=50):
+    # Configure font for Chinese labels
+    plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
+    plt.rcParams['axes.unicode_minus'] = False
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    im = ax.imshow(cos_mat, cmap='viridis', vmin=-1.0, vmax=1.0)
+    ax.set_title(title)
+    # Tick density control
+    n = len(labels)
+    if n <= max_ticks:
+        ax.set_xticks(np.arange(n))
+        ax.set_yticks(np.arange(n))
+        ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
+        ax.set_yticklabels(labels, fontsize=8)
+    else:
+        step = max(1, n // max_ticks)
+        idxs = np.arange(0, n, step)
+        ax.set_xticks(idxs)
+        ax.set_yticks(idxs)
+        ax.set_xticklabels([labels[i] for i in idxs], rotation=45, ha='right', fontsize=8)
+        ax.set_yticklabels([labels[i] for i in idxs], fontsize=8)
+    ax.grid(False)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('Cosine Similarity')
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+
+
+def visualize_cat_embeddings(model, json_path, save_dir, features=None, max_tokens_per_feature=50):
+    """Visualize cosine heatmaps for selected categorical embeddings.
+
+    - model: trained model with cat_embs
+    - json_path: path to tokenize_dict.json
+    - save_dir: directory to save heatmaps
+    - features: list of base feature names in tokenize_dict.json to visualize
+    - max_tokens_per_feature: cap to avoid overly large plots
+    """
+    tok_dict = _load_tokenize_dict(json_path)
+    if not hasattr(model, 'cat_embs') or model.cat_embs is None:
+        print("Model has no categorical embeddings to visualize.")
+        return
+
+    if features is None:
+        features = ['Account Type', 'Action Type', 'Source Type', 'Product ID']
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    for base_name in features:
+        model_key = f"{base_name}_enc"
+        if model_key not in model.cat_embs:
+            print(f"Skip: embedding not found in model for {model_key}")
+            continue
+        if base_name not in tok_dict:
+            print(f"Skip: {base_name} not found in tokenize_dict.json")
+            continue
+
+        name_to_id = tok_dict[base_name]
+        # Sort tokens by id to align with embedding row indices
+        items = sorted(name_to_id.items(), key=lambda kv: kv[1])
+
+        emb_layer = model.cat_embs[model_key]
+        vocab_size = emb_layer.num_embeddings
+        emb_weight = emb_layer.weight.detach().cpu().numpy()
+
+        # Filter valid ids within embedding vocab and cap count
+        valid = [(name, idx) for name, idx in items if 0 <= idx < vocab_size]
+        if len(valid) == 0:
+            print(f"Skip: no valid tokens within vocab for {base_name}")
+            continue
+        if len(valid) > max_tokens_per_feature:
+            valid = valid[:max_tokens_per_feature]
+
+        labels = [name for name, idx in valid]
+        rows = [idx for name, idx in valid]
+        sub_emb = emb_weight[rows, :]
+        cos_mat = _compute_cosine_matrix(sub_emb)
+
+        filename = f"{base_name.replace(' ', '_')}_cosine_heatmap.png"
+        save_path = os.path.join(save_dir, filename)
+        _plot_cosine_heatmap(
+            cos_mat,
+            labels,
+            title=f"{base_name} Embedding Cosine Heatmap",
+            save_path=save_path,
+            max_ticks=50,
+        )
+        print(f"Saved: {save_path}")
+
+
+def plot_clustered_product_id_embedding(
+    model, json_path, save_dir, n_clusters=8, max_tokens=50
+):
+    """
+    Perform KMeans clustering on Product ID embedding, and create a heatmap divided by cluster labels, then save the image.
+    """
+    tok_dict = _load_tokenize_dict(json_path)
+    base_name = 'Product ID'
+    model_key = f'{base_name}_enc'
+    if model_key not in model.cat_embs or base_name not in tok_dict:
+        print(f"Cannot find Product ID embedding or this feature is not in tokenize_dict.json.")
+        return
+    name_to_id = tok_dict[base_name]
+    items = sorted(name_to_id.items(), key=lambda kv: kv[1])
+    emb_layer = model.cat_embs[model_key]
+    vocab_size = emb_layer.num_embeddings
+    emb_weight = emb_layer.weight.detach().cpu().numpy()
+    valid = [(name, idx) for name, idx in items if 0 <= idx < vocab_size]
+    if len(valid) == 0:
+        print(f"No valid Product ID tokens")
+        return
+    if len(valid) > max_tokens:
+        valid = valid[:max_tokens]
+    labels = [name for name, idx in valid]
+    rows = [idx for name, idx in valid]
+    sub_emb = emb_weight[rows, :]
+    cos_mat = _compute_cosine_matrix(sub_emb)
+    # KMeans clustering
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    clusters = kmeans.fit_predict(sub_emb)
+    # Sort by cluster groups
+    sort_idx = np.argsort(clusters)
+    cos_sorted = cos_mat[sort_idx][:, sort_idx]
+    labels_sorted = [labels[i] for i in sort_idx]
+    clusters_sorted = clusters[sort_idx]
+    # Plot clustered heatmap
+    plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
+    plt.rcParams['axes.unicode_minus'] = False
+    fig, ax = plt.subplots(figsize=(10, 8))
+    im = ax.imshow(cos_sorted, cmap='viridis', vmin=-1.0, vmax=1.0)
+    n = len(labels_sorted)
+    max_ticks = 50
+    if n <= max_ticks:
+        ax.set_xticks(np.arange(n))
+        ax.set_yticks(np.arange(n))
+        ax.set_xticklabels(labels_sorted, rotation=90, fontsize=7)
+        ax.set_yticklabels(labels_sorted, fontsize=7)
+    else:
+        step = max(1, n // max_ticks)
+        idxs = np.arange(0, n, step)
+        ax.set_xticks(idxs)
+        ax.set_yticks(idxs)
+        ax.set_xticklabels([labels_sorted[i] for i in idxs], rotation=90, fontsize=7)
+        ax.set_yticklabels([labels_sorted[i] for i in idxs], fontsize=7)
+    ax.set_title(f'Product ID Embedding Cosine Heatmap (Clustered, K={n_clusters})')
+    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('Cosine Similarity')
+    # Draw borders to separate each cluster boundary
+    for j in range(1, n):
+        if clusters_sorted[j] != clusters_sorted[j-1]:
+            ax.axhline(j-0.5, color='red', linewidth=0.5, alpha=0.5)
+            ax.axvline(j-0.5, color='red', linewidth=0.5, alpha=0.5)
+    plt.tight_layout()
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f'Product_ID_cosine_heatmap_clustered_{n_clusters}.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f'Product ID clustered heatmap saved: {save_path}')
+
+
+def plot_cluster_id_embedding(model, save_dir, max_tokens=60):
+    """
+    Plot cosine similarity heatmap for cluster_id embedding.
+    
+    - model: Trained model containing cluster_id embedding
+    - save_dir: Directory to save images
+    - max_tokens: Maximum number of tokens to display (default 60, corresponding to vocab_size)
+    """
+    model_key = 'cluster_id'
+    
+    if not hasattr(model, 'cat_embs') or model.cat_embs is None:
+        print("Model has no categorical embedding layers.")
+        return
+    
+    if model_key not in model.cat_embs:
+        print(f"{model_key} embedding not found in model.")
+        return
+    
+    emb_layer = model.cat_embs[model_key]
+    vocab_size = emb_layer.num_embeddings
+    emb_weight = emb_layer.weight.detach().cpu().numpy()
+    
+    # Use all valid embeddings (0 to vocab_size-1)
+    n_tokens = min(vocab_size, max_tokens)
+    rows = list(range(n_tokens))
+    labels = [f'cluster_{i}' for i in rows]
+    sub_emb = emb_weight[rows, :]
+    cos_mat = _compute_cosine_matrix(sub_emb)
+    
+    # Plot heatmap
+    plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
+    plt.rcParams['axes.unicode_minus'] = False
+    fig, ax = plt.subplots(figsize=(10, 8))
+    im = ax.imshow(cos_mat, cmap='viridis', vmin=-1.0, vmax=1.0)
+    
+    n = len(labels)
+    max_ticks = 50
+    if n <= max_ticks:
+        ax.set_xticks(np.arange(n))
+        ax.set_yticks(np.arange(n))
+        ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
+        ax.set_yticklabels(labels, fontsize=8)
+    else:
+        step = max(1, n // max_ticks)
+        idxs = np.arange(0, n, step)
+        ax.set_xticks(idxs)
+        ax.set_yticks(idxs)
+        ax.set_xticklabels([labels[i] for i in idxs], rotation=45, ha='right', fontsize=8)
+        ax.set_yticklabels([labels[i] for i in idxs], fontsize=8)
+    
+    ax.set_title('Cluster ID Embedding Cosine Heatmap')
+    ax.grid(False)
+    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('Cosine Similarity')
+    
+    plt.tight_layout()
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, 'cluster_id_cosine_heatmap.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f'Cluster ID heatmap saved: {save_path}')
+
+
+def plot_clustered_cluster_id_embedding(
+    model, save_dir, n_clusters=8, max_tokens=60
+):
+    """
+    Perform KMeans clustering on cluster_id embedding, and create a heatmap divided by cluster labels, then save the image.
+    """
+    model_key = 'cluster_id'
+    
+    if not hasattr(model, 'cat_embs') or model.cat_embs is None:
+        print("Model has no categorical embedding layers.")
+        return
+    
+    if model_key not in model.cat_embs:
+        print(f"{model_key} embedding not found in model.")
+        return
+    
+    emb_layer = model.cat_embs[model_key]
+    vocab_size = emb_layer.num_embeddings
+    emb_weight = emb_layer.weight.detach().cpu().numpy()
+    
+    # Use all valid embeddings (0 to vocab_size-1)
+    n_tokens = min(vocab_size, max_tokens)
+    rows = list(range(n_tokens))
+    labels = [f'cluster_{i}' for i in rows]
+    sub_emb = emb_weight[rows, :]
+    cos_mat = _compute_cosine_matrix(sub_emb)
+    
+    # KMeans clustering
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+    clusters = kmeans.fit_predict(sub_emb)
+    
+    # Sort by cluster groups
+    sort_idx = np.argsort(clusters)
+    cos_sorted = cos_mat[sort_idx][:, sort_idx]
+    labels_sorted = [labels[i] for i in sort_idx]
+    clusters_sorted = clusters[sort_idx]
+    
+    # Plot clustered heatmap
+    plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
+    plt.rcParams['axes.unicode_minus'] = False
+    fig, ax = plt.subplots(figsize=(10, 8))
+    im = ax.imshow(cos_sorted, cmap='viridis', vmin=-1.0, vmax=1.0)
+    
+    n = len(labels_sorted)
+    max_ticks = 50
+    if n <= max_ticks:
+        ax.set_xticks(np.arange(n))
+        ax.set_yticks(np.arange(n))
+        ax.set_xticklabels(labels_sorted, rotation=90, fontsize=7)
+        ax.set_yticklabels(labels_sorted, fontsize=7)
+    else:
+        step = max(1, n // max_ticks)
+        idxs = np.arange(0, n, step)
+        ax.set_xticks(idxs)
+        ax.set_yticks(idxs)
+        ax.set_xticklabels([labels_sorted[i] for i in idxs], rotation=90, fontsize=7)
+        ax.set_yticklabels([labels_sorted[i] for i in idxs], fontsize=7)
+    
+    ax.set_title(f'Cluster ID Embedding Cosine Heatmap (Clustered, K={n_clusters})')
+    ax.grid(False)
+    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('Cosine Similarity')
+    
+    # Draw borders to separate each cluster boundary
+    for j in range(1, n):
+        if clusters_sorted[j] != clusters_sorted[j-1]:
+            ax.axhline(j-0.5, color='red', linewidth=0.5, alpha=0.5)
+            ax.axvline(j-0.5, color='red', linewidth=0.5, alpha=0.5)
+    
+    plt.tight_layout()
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f'cluster_id_cosine_heatmap_clustered_{n_clusters}.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    print(f'Cluster ID clustered heatmap saved: {save_path}')
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate trained model")
     
@@ -309,7 +763,7 @@ def main():
                        help="Model file path (e.g., checkpoints/best_model.pth)")
     
     # Data parameters
-    parser.add_argument("--data_dir", type=str, required=True, 
+    parser.add_argument("--data_dir", type=str, default="final/matched", 
                        help="Test data directory")
     parser.add_argument("--max_len", type=int, default=50, 
                        help="Maximum sequence length")
@@ -323,6 +777,8 @@ def main():
     # Other parameters
     parser.add_argument("--seed", type=int, default=42, 
                        help="Random seed")
+    parser.add_argument('--product_id_clusters', type=int, default=8, help='Number of KMeans clusters for Product ID embedding')
+    parser.add_argument('--cluster_id_clusters', type=int, default=8, help='Number of KMeans clusters for Cluster ID embedding')
     
     args = parser.parse_args()
     
@@ -342,6 +798,20 @@ def main():
     
     # Load model
     model, model_args = load_model(args.model_path, device)
+
+    # Embedding visualization
+    try:
+        emb_save_dir = os.path.join(args.save_dir, 'embeddings')
+        visualize_cat_embeddings(model, json_path='tokenize_dict.json', save_dir=emb_save_dir)
+        plot_clustered_product_id_embedding(
+            model, 'tokenize_dict.json', emb_save_dir, n_clusters=args.product_id_clusters
+        )
+        plot_cluster_id_embedding(model, save_dir=emb_save_dir)
+        plot_clustered_cluster_id_embedding(
+            model, emb_save_dir, n_clusters=args.cluster_id_clusters
+        )
+    except Exception as e:
+        print(f"Embedding visualization failed: {e}")
     
     # Create test data loader
     print("Loading test data...")
@@ -383,7 +853,7 @@ def main():
     plot_evaluation_results(results, analysis, resolved_target_names, args.save_dir)
     
     # Save evaluation results
-    save_evaluation_results(results, analysis, resolved_target_names, args.save_dir)
+    save_evaluation_results(results, analysis, resolved_target_names, args.save_dir, model)
     
     print("\nModel evaluation completed!")
 
