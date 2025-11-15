@@ -5,6 +5,30 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class MSELoss(nn.Module):
+    def __init__(self, reduction="mean"):
+        super().__init__()
+        self.reduction = reduction
+
+    def forward(self, preds, target, valid_mask):
+        """
+        preds: [B, T, D]
+        target: [B, T, D]
+        valid_mask: [B, T] (1 means valid step)
+        """
+        # Expand mask to match feature dimension
+        m = valid_mask.unsqueeze(-1).to(preds.dtype)  # [B,T,1]
+
+        diff = (preds - target) * m  # mask invalid steps
+
+        if self.reduction == "sum":
+            return (diff ** 2).sum()
+
+        # count how many elements actually valid
+        valid_count = m.sum() * preds.size(-1)    # e.g. B*T*D (only for valid steps)
+        valid_count = valid_count.clamp_min(1.0)
+
+        return (diff ** 2).sum() / valid_count
 
 class HuberLoss(nn.Module):
     """Huber / Pseudo-Huber loss with optional column weights.
@@ -26,114 +50,91 @@ class HuberLoss(nn.Module):
 
     def __init__(
         self,
-        delta: Optional[float] = 1.0,
+        delta=1.0,
         *,
-        pseudo: bool = False,
-        reduction: str = "mean",
-        apply_sigmoid: bool = True,
-        auto_delta_p: Optional[float] = None,
-        column_weights: Optional[torch.Tensor] = None,
-    ) -> None:
+        pseudo=False,
+        reduction="mean",
+        apply_sigmoid=False,        # 默认关闭！
+        auto_delta_p=None,
+        column_weights=None,
+    ):
         super().__init__()
-        if reduction not in {"mean", "sum", "none"}:
-            raise ValueError("reduction must be one of {'mean','sum','none'}")
-        self.delta = None if delta is None else float(delta)
-        self.pseudo = bool(pseudo)
+        assert reduction in {"mean", "sum", "none"}
+
+        self.delta = delta
+        self.pseudo = pseudo
         self.reduction = reduction
-        self.apply_sigmoid = bool(apply_sigmoid)
-        self.auto_delta_p = None if auto_delta_p is None else float(auto_delta_p)
-        
-        # Register column weights as buffer if provided
+        self.apply_sigmoid = apply_sigmoid
+        self.auto_delta_p = auto_delta_p
+
         if column_weights is not None:
-            if isinstance(column_weights, (list, tuple)):
-                column_weights = torch.tensor(column_weights, dtype=torch.float32)
-            elif not isinstance(column_weights, torch.Tensor):
-                raise ValueError("column_weights must be a tensor, list, or None")
-            self.register_buffer('column_weights', column_weights.float())
-        else:
-            self.register_buffer('column_weights', None)
+            column_weights = torch.as_tensor(column_weights, dtype=torch.float32)
+        self.register_buffer("column_weights", column_weights)
 
-    @staticmethod
-    def _percentile(x: torch.Tensor, q: float) -> torch.Tensor:
-        q = float(q)
-        k = max(1, int(round((q * (x.numel() - 1)))))
-        # Use torch.kthvalue to approximate percentile/quantile
-        values, _ = torch.kthvalue(x.view(-1), k)
-        return values
-
-    def forward(self, preds: torch.Tensor, target: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Args:
-            preds: [B, T, D] or [B, D] predictions
-            target: [B, T, D] or [B, D] targets
-            mask: Optional [B, T] mask for valid time steps (for sequence data)
-        """
+    def forward(self, preds, target, mask=None):
         if self.apply_sigmoid:
             preds = torch.sigmoid(preds)
+
+        # Prepare mask if provided (consistent with MSE loss)
+        if mask is not None:
+            m = mask.unsqueeze(-1).to(preds.dtype)  # [B, T, 1]
+        else:
+            m = None
+
+        # Compute error and apply mask to error (consistent with MSE loss)
         e = preds - target
+        if m is not None:
+            e = e * m  # mask invalid steps, same as MSE: diff = (preds - target) * m
         abs_e = e.abs()
 
+        # auto delta is dangerous if computed on training batch
+        # If mask is provided, only use valid steps for quantile calculation
         if self.auto_delta_p is not None:
-            # In-batch adaptive δ (recommended to compute on validation residuals)
             with torch.no_grad():
-                delta_t = self._percentile(abs_e.detach(), self.auto_delta_p).clamp(min=1e-6)
-            delta = delta_t
+                if m is not None:
+                    # Only compute quantile on valid steps
+                    valid_abs_e = abs_e  # abs_e is already masked
+                    # Flatten and filter out zeros (invalid steps)
+                    valid_values = valid_abs_e[valid_abs_e > 0]
+                    if valid_values.numel() > 0:
+                        delta = torch.quantile(valid_values.detach(), self.auto_delta_p)
+                    else:
+                        delta = torch.tensor(self.delta, device=preds.device, dtype=preds.dtype)
+                else:
+                    delta = torch.quantile(abs_e.detach(), self.auto_delta_p)
         else:
-            if self.delta is None:
-                raise ValueError("delta is None and auto_delta_p is None; one must be provided")
-            delta = torch.as_tensor(self.delta, device=preds.device, dtype=preds.dtype)
+            delta = torch.tensor(self.delta, device=preds.device, dtype=preds.dtype)
 
         if self.pseudo:
-            # δ^2 ( sqrt(1 + (e/δ)^2) - 1 )
-            loss = (delta ** 2) * (torch.sqrt(1 + (e / delta) ** 2) - 1)
+            loss = delta**2 * (torch.sqrt(1 + (e / delta)**2) - 1)
         else:
-            # Standard Huber piecewise form
-            quad = 0.5 * (e ** 2)
-            lin = delta * (abs_e - 0.5 * delta)
-            loss = torch.where(abs_e <= delta, quad, lin)
+            loss = torch.where(abs_e <= delta, 0.5 * e**2, delta * (abs_e - 0.5 * delta))
 
-        # Apply column weights if provided
         if self.column_weights is not None:
-            # Ensure column_weights shape matches the last dimension of loss
-            if loss.dim() == 3:  # [B, T, D]
-                weights = self.column_weights.view(1, 1, -1).to(loss.device)
-            elif loss.dim() == 2:  # [B, D]
-                weights = self.column_weights.view(1, -1).to(loss.device)
-            else:
-                weights = self.column_weights.to(loss.device)
-            loss = loss * weights
+            w = self.column_weights.view(1, 1, -1).to(loss.device)
+            loss = loss * w
 
-        # Apply mask if provided (for sequence data)
-        if mask is not None:
-            if loss.dim() == 3:  # [B, T, D]
-                mask_expanded = mask.unsqueeze(-1).to(loss.dtype)  # [B, T, 1]
-                loss = loss * mask_expanded
-                if self.reduction == "mean":
-                    # denom should be the total number of valid elements (B*T*D), not just B*T
-                    # mask_expanded.sum() gives B*T (number of valid time steps), need to multiply by feature dim D
-                    denom = (mask_expanded.sum() * preds.shape[-1]).clamp_min(1.0)
-                    return loss.sum() / denom
-                elif self.reduction == "sum":
-                    return loss.sum()
-                else:
-                    return loss
-            else:
-                # For 2D case, mask should be [B] if needed
-                if mask.dim() == 1 and mask.size(0) == loss.size(0):
-                    mask_expanded = mask.unsqueeze(-1).to(loss.dtype)
-                    loss = loss * mask_expanded
-                    if self.reduction == "mean":
-                        return loss.sum() / mask_expanded.sum().clamp_min(1.0)
-                    elif self.reduction == "sum":
-                        return loss.sum()
-                    else:
-                        return loss
+        if m is not None:
+            # Loss is already masked since e is masked
+            # But apply mask again to ensure consistency (loss = loss * m)
+            m_loss = m.to(loss.dtype)
+            loss = loss * m_loss
 
-        if self.reduction == "mean":
-            return loss.mean()
-        if self.reduction == "sum":
-            return loss.sum()
-        return loss
+            if self.reduction == "mean":
+                # Count valid elements: same as MSE loss
+                valid_count = m.sum() * preds.size(-1)
+                valid_count = valid_count.clamp_min(1.0)
+                return loss.sum() / valid_count
+
+            elif self.reduction == "sum":
+                return loss.sum()
+
+            else:
+                return loss
+
+        # no mask
+        return loss.mean() if self.reduction == "mean" else \
+               loss.sum()   if self.reduction == "sum" else loss
 
 
 class QuantileLoss(nn.Module):
@@ -326,6 +327,9 @@ def build_loss_from_args(args: argparse.Namespace) -> nn.Module:
             margin=getattr(args, "hinge_margin", 1.0),
             reduction="mean"
         )
+
+    if loss_type == "mse":
+        return MSELoss(reduction="mean")
 
     raise ValueError(f"Unknown loss_type: {loss_type}")
 

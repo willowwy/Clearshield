@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.cuda.amp import autocast, GradScaler
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
 import time
@@ -114,7 +115,7 @@ def train_epoch(model, train_loader, optimizer, criterion, device, feature_names
                 valid_steps = mask[:, 1:]
 
                 mse, mae = _masked_regression_metrics(pred_steps, target_steps, valid_steps)
-                loss = mse  # optimize MSE
+                loss = criterion(pred_steps, target_steps, valid_steps)
 
                 # Backward pass
                 if use_amp and scaler is not None:
@@ -170,7 +171,7 @@ def evaluate(model, val_loader, criterion, device, feature_names, target_indices
                 valid_steps = mask[:, 1:]
 
                 mse, mae = _masked_regression_metrics(pred_steps, target_steps, valid_steps)
-                loss = mse
+                loss = criterion(pred_steps, target_steps, valid_steps)  # Use same criterion as training
                 total_loss += loss.item()
                 total_mse += mse.item()
                 total_mae += mae.item()
@@ -203,7 +204,7 @@ def test_model(model, test_loader, criterion, device, feature_names, target_indi
                 valid_steps = mask[:, 1:]
 
                 mse, mae = _masked_regression_metrics(pred_steps, target_steps, valid_steps)
-                loss = mse
+                loss = criterion(pred_steps, target_steps, valid_steps)  # Use same criterion as training
                 total_loss += loss.item()
                 total_mse += mse.item()
                 total_mae += mae.item()
@@ -215,7 +216,7 @@ def test_model(model, test_loader, criterion, device, feature_names, target_indi
     print("=" * 60)
     print("Test set evaluation results (regression):")
     print("=" * 60)
-    print(f"test loss (MSE): {avg_loss:.6f}")
+    print(f"test loss: {avg_loss:.6f}")
     print(f"test MSE: {avg_mse:.6f}")
     print(f"test MAE: {avg_mae:.6f}")
     print("=" * 60)
@@ -564,7 +565,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train sequence model (LSTM or Transformer)")
     
     # Data related parameters
-    parser.add_argument("--data_dir", type=str, default="data/final/no_fraud", help="Data directory")
+    parser.add_argument("--data_dir", type=str, default="data/test/no_fraud", help="Data directory")
     parser.add_argument("--max_len", type=int, default=50, help="Maximum sequence length")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--train_ratio", type=float, default=0.8, help="Training set ratio")
@@ -573,15 +574,15 @@ def main():
     
     # Training related parameters
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay")
+    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay")
     parser.add_argument("--patience", type=int, default=5, help="Learning rate scheduler patience")
     parser.add_argument("--early_stopping_patience", type=int, default=10, help="Early stopping patience")
     parser.add_argument("--use_amp", action="store_true", help="Use mixed precision training (AMP)")
     
     # Loss options
-    parser.add_argument("--loss_type", type=str, default="huber", choices=["bce", "huber", "pseudohuber", "quantile"], help="Choose loss function")
-    parser.add_argument("--delta", type=float, default=1.0, help="Huber/Pseudo-Huber delta (δ)")
+    parser.add_argument("--loss_type", type=str, default="mse", choices=["bce", "huber", "pseudohuber", "quantile"], help="Choose loss function")
+    parser.add_argument("--delta", type=float, default=10, help="Huber/Pseudo-Huber delta (δ)")
     parser.add_argument("--auto_delta_p", type=float, default=0.9, help="Auto delta: p-quantile of residual |e|, e.g., 0.9")
     parser.add_argument("--quantiles", type=str, default="0.1,0.5,0.9", help="Quantile list, comma-separated")
     parser.add_argument("--crossing_lambda", type=float, default=0.0, help="Anti-crossing regularization λ for quantile regression")
