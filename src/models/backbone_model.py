@@ -47,18 +47,20 @@ class TimeCatLSTM(nn.Module):
                     elif "Account Type" in name:
                         vocab, emb = 15, 16
                     elif "Product ID" in name:
-                        vocab, emb = 160, 16
+                        vocab, emb = 160, 32  # Match Transformer configuration
                     elif "Action Type" in name:
                         vocab, emb = 5, 5
                     elif "Source Type" in name:
-                        vocab, emb = 20, 20
+                        vocab, emb = 20, 16  # Match Transformer configuration
                     else:
                         vocab, emb = 50, 4  # Default configuration
                     
                     self.cat_embs[name] = nn.Embedding(vocab, emb)
                     cat_total_dim += emb
 
-        lstm_input_dim = time_total_dim + cat_total_dim + args.cont_dim
+        # Total input dimension after embeddings (for consistency with Transformer)
+        self.input_dim = time_total_dim + cat_total_dim + args.cont_dim
+        lstm_input_dim = self.input_dim
 
         self.lstm = nn.LSTM(
             input_size=lstm_input_dim,
@@ -72,13 +74,15 @@ class TimeCatLSTM(nn.Module):
         # Prediction head for next-step vector forecasting
         # Determine prediction dimension: prefer explicit pred_dim, otherwise use number of target_names
         inferred_pred_dim = getattr(args, 'pred_dim', 0)
+        target_names = getattr(args, 'target_names', []) or []
         if not inferred_pred_dim:
-            target_names = getattr(args, 'target_names', []) or []
             if target_names:
                 inferred_pred_dim = len(target_names)
             else:
                 inferred_pred_dim = len(getattr(args, 'feature_names', []) or [])
         self.pred_dim = inferred_pred_dim
+        # Store target_names for compatibility with train_judge.py
+        self.target_names = target_names if target_names else (getattr(args, 'feature_names', []) or [])
         self.head = nn.Linear(last_dim, self.pred_dim)
 
     def forward(
@@ -195,6 +199,7 @@ class TimeCatLSTM(nn.Module):
             raise e
 
         # Categorical embeddings - add debug information
+        c_emb = None
         if len(self.cat_embs) > 0 and categorical_features:
             # Record categorical feature information
             with open("time_features_debug.txt", "a") as f:
@@ -230,10 +235,24 @@ class TimeCatLSTM(nn.Module):
             # Apply embedding dropout
             c_emb = self.emb_dropout(c_emb)
             cont_x = torch.cat(continuous_features, dim=-1) if continuous_features else torch.zeros(x.size(0), x.size(1), 0, device=x.device, dtype=torch.float32)
-            x = torch.cat([t_emb, cont_x, c_emb], dim=-1)
+            x_emb = torch.cat([t_emb, cont_x, c_emb], dim=-1)
         else:
             cont_x = torch.cat(continuous_features, dim=-1) if continuous_features else torch.zeros(x.size(0), x.size(1), 0, device=x.device, dtype=torch.float32)
-            x = torch.cat([t_emb, cont_x], dim=-1)
+            x_emb = torch.cat([t_emb, cont_x], dim=-1)
+        
+        # Verify dimension match (for consistency with Transformer and debugging)
+        if x_emb.shape[-1] != self.input_dim:
+            raise RuntimeError(
+                f"Dimension mismatch: x_emb has shape {x_emb.shape} (last dim={x_emb.shape[-1]}), "
+                f"but LSTM expects {self.input_dim}. "
+                f"Time dim: {t_emb.shape[-1]}, Cont dim: {cont_x.shape[-1]}, "
+                f"Cat dim: {c_emb.shape[-1] if c_emb is not None else 0}, "
+                f"Cat embeddings: {list(self.cat_embs.keys())}, "
+                f"Categorical features found: {list(categorical_features.keys())}, "
+                f"Feature names: {feature_names}"
+            )
+        
+        x = x_emb
 
         if use_pack:
             lengths = mask.sum(dim=1).long().clamp_min(1)
@@ -336,13 +355,15 @@ class FraudEnc(nn.Module):
         
         # Prediction head for next-step vector forecasting
         inferred_pred_dim = getattr(args, 'pred_dim', 0)
+        target_names = getattr(args, 'target_names', []) or []
         if not inferred_pred_dim:
-            target_names = getattr(args, 'target_names', []) or []
             if target_names:
                 inferred_pred_dim = len(target_names)
             else:
                 inferred_pred_dim = len(getattr(args, 'feature_names', []) or [])
         self.pred_dim = inferred_pred_dim
+        # Store target_names for compatibility with train_judge.py
+        self.target_names = target_names if target_names else (getattr(args, 'feature_names', []) or [])
         self.head = nn.Linear(transformer_dim, self.pred_dim)
         
         # Store transformer_dim for forward pass
@@ -453,7 +474,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Time+Category Embedding LSTM (binary)")
     
     # Model type selection
-    p.add_argument("--model_type", type=str, default="transformer", choices=["lstm", "transformer", "fraudenc"], 
+    p.add_argument("--model_type", type=str, default="lstm", choices=["lstm", "transformer", "fraudenc"], 
                    help="Model type: lstm, transformer, or fraudenc")
     
     # Continuous feature dimension (needs to match data)
@@ -480,7 +501,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # LSTM
     p.add_argument("--lstm_hidden", type=int, default=128, help="LSTM hidden layer dimension")
-    p.add_argument("--lstm_layers", type=int, default=1, help="LSTM layer count")
+    p.add_argument("--lstm_layers", type=int, default=2, help="LSTM layer count")
     p.add_argument("--dropout", type=float, default=0.1, help="Dropout rate")
     p.add_argument("--bidirectional", action="store_true", help="Whether to use bidirectional LSTM")
     
@@ -501,7 +522,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
-def build_model(args: argparse.Namespace):
+def build_seq_model(args: argparse.Namespace):
     """Build model based on model_type argument."""
     model_type = getattr(args, 'model_type', 'lstm').lower()
     if model_type == 'transformer' or model_type == 'fraudenc':
@@ -530,7 +551,7 @@ if __name__ == "__main__":
     ]])
     
     # Build model
-    model = build_model(args)
+    model = build_seq_model(args)
     n_params = sum(p.numel() for p in model.parameters())
     print("Model built.")
     print("Total params:", n_params)

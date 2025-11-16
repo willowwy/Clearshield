@@ -27,15 +27,9 @@ from sklearn.metrics import (
     roc_auc_score, confusion_matrix, classification_report
 )
 
-from src.models.backbone_model import build_arg_parser, build_model
+from src.models.backbone_model import build_arg_parser, build_seq_model
 from src.models.datasets import create_dataloader
-
-
-def count_parameters(model):
-    """Count model parameters"""
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    return total_params, trainable_params
+from src.models.load_model import count_parameters
 
 
 def print_model_hyperparameters(args):
@@ -150,7 +144,7 @@ def load_model(model_path, device):
     print(f"Best validation loss (MSE): {checkpoint.get('val_loss', 0.0):.6f}")
     
     # rebuild model
-    model = build_model(args).to(device)
+    model = build_seq_model(args).to(device)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
