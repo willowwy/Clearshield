@@ -474,7 +474,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Time+Category Embedding LSTM (binary)")
     
     # Model type selection
-    p.add_argument("--model_type", type=str, default="lstm", choices=["lstm", "transformer", "fraudenc"], 
+    p.add_argument("--model_type", type=str, default="transformer", choices=["lstm", "transformer", "fraudenc"], 
                    help="Model type: lstm, transformer, or fraudenc")
     
     # Continuous feature dimension (needs to match data)
@@ -507,8 +507,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     
     # Transformer (for FraudEnc)
     p.add_argument("--transformer_dim", type=int, default=128, help="Transformer embedding dimension")
-    p.add_argument("--nhead", type=int, default=8, help="Number of attention heads in transformer")
-    p.add_argument("--num_encoder_layers", type=int, default=3, help="Number of transformer encoder layers")
+    p.add_argument("--nhead", type=int, default=32, help="Number of attention heads in transformer")
+    p.add_argument("--num_encoder_layers", type=int, default=2, help="Number of transformer encoder layers")
     p.add_argument("--dim_feedforward", type=int, default=0, help="Feedforward dimension (0 = 2 * transformer_dim)")
     p.add_argument("--activation", type=str, default="relu", help="Activation function (relu/gelu)")
     p.add_argument("--norm_first", action="store_true", help="Apply normalization before attention/ffn (Pre-LN)")
@@ -517,7 +517,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Training related (optional)
     p.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     p.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay")
-    p.add_argument("--embedding_dropout", type=float, default=0, help="Dropout rate for embeddings")
+    p.add_argument("--embedding_dropout", type=float, default=0.1, help="Dropout rate for embeddings")
     p.add_argument("--seed", type=int, default=42, help="Random seed")
     return p
 

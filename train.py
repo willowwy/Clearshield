@@ -667,9 +667,9 @@ def main():
     parser.add_argument("--data_dir", type=str, default="data/final/no_fraud", help="Data directory")
     parser.add_argument("--max_len", type=int, default=50, help="Maximum sequence length")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
-    parser.add_argument("--train_ratio", type=float, default=0.8, help="Training set ratio")
+    parser.add_argument("--train_ratio", type=float, default=0.85, help="Training set ratio")
     parser.add_argument("--val_ratio", type=float, default=0.1, help="Validation set ratio")
-    parser.add_argument("--test_ratio", type=float, default=0.1, help="Test set ratio")
+    parser.add_argument("--test_ratio", type=float, default=0.05, help="Test set ratio")
     
     # Training related parameters
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
@@ -694,7 +694,7 @@ def main():
     
     # Sliding window parameters
     parser.add_argument("--use_sliding_window", action="store_true", help="Use sliding window to increase data volume")
-    parser.add_argument("--window_overlap", type=float, default=0.8, help="Sliding window overlap ratio (0.0-0.9)")
+    parser.add_argument("--window_overlap", type=float, default=0.5, help="Sliding window overlap ratio (0.0-0.9)")
     
     # Other parameters
     parser.add_argument("--seed", type=int, default=42, help="Random seed")

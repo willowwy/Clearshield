@@ -2,7 +2,7 @@
 Inference script: Fraud detection inference for a single CSV file
 
 Usage:
-python inference.py --csv_file path/to/file.csv --sequence_model_path checkpoints/best_model_enc.pth --judge_model_path checkpoints/best_judge_model.pth --max_len 50
+python inference.py --folder path/to/folder --member_id 12345 --sequence_model_path checkpoints/best_model_enc.pth --judge_model_path checkpoints/best_judge_model.pth --max_len 50
 '''
 import os
 import argparse
@@ -193,8 +193,10 @@ def main():
     parser = argparse.ArgumentParser(description="Fraud detection inference for a single CSV file")
     
     # Required arguments
-    parser.add_argument("--csv_file", type=str, required=True,
-                       help="CSV file path to infer")
+    parser.add_argument("--folder", type=str, required=True,
+                       help="Folder path containing CSV files")
+    parser.add_argument("--member_id", type=str, required=True,
+                       help="Member ID (CSV file will be: member_<member_id>.csv)")
     parser.add_argument("--sequence_model_path", type=str, required=True,
                        help="Sequence model path (e.g., checkpoints/best_model_enc.pth)")
     parser.add_argument("--judge_model_path", type=str, required=True,
@@ -207,6 +209,13 @@ def main():
                        help="Device (cuda/cpu), default auto-select")
     
     args = parser.parse_args()
+    
+    # Construct CSV file path from folder and member_id
+    csv_file = os.path.join(args.folder, f"member_{args.member_id}.csv")
+    
+    # Check if file exists
+    if not os.path.exists(csv_file):
+        raise FileNotFoundError(f"CSV file not found: {csv_file}")
     
     # Set device
     if args.device is None:
@@ -229,7 +238,7 @@ def main():
     print("Preparing inference data")
     print("="*60)
     X, mask, last_row_features, last_row_target, target_indices, target_names, inferred_feature_names = \
-        prepare_inference_data(args.csv_file, args.max_len, feature_names)
+        prepare_inference_data(csv_file, args.max_len, feature_names)
     
     # Update feature names
     feature_names = inferred_feature_names
@@ -288,14 +297,16 @@ def main():
     print("\n" + "="*60)
     print("Inference results")
     print("="*60)
-    print(f"CSV file: {args.csv_file}")
+    print(f"Member ID: {args.member_id}")
+    print(f"CSV file: {csv_file}")
     print(f"Fraud probability: {fraud_prob:.4f}")
     print(f"Judgment: {'Fraud' if is_fraud else 'Normal'}")
     print("="*60)
     
     # Return result dictionary (can be used for subsequent processing)
     return {
-        'csv_file': args.csv_file,
+        'member_id': args.member_id,
+        'csv_file': csv_file,
         'fraud_probability': fraud_prob,
         'is_fraud': is_fraud,
         'predictions': last_step_pred_selected.tolist(),
