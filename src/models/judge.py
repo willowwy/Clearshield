@@ -21,23 +21,35 @@ class FraudJudgeDNN(nn.Module):
                  dropout: float = 0.2,
                  use_attention: bool = False,
                  use_statistical_features: bool = True,
-                 use_basic_features: bool = True):
+                 use_basic_features: bool = True,
+                 hidden_dim: int = None,
+                 use_pred: bool = False):
         super().__init__()
         
         self.pred_dim = pred_dim
         self.use_attention = use_attention
         self.use_statistical_features = use_statistical_features
         self.use_basic_features = use_basic_features
+        self.hidden_dim = hidden_dim  # Dimension of hidden representation
+        self.use_pred = use_pred  # Whether to use predictions in addition to hidden representation
         
         # Calculate input dimension based on feature configuration
-        if use_basic_features and use_statistical_features:
-            input_dim = pred_dim * 3 + 6  # Basic features + statistical features
-        elif use_basic_features and not use_statistical_features:
-            input_dim = pred_dim * 3  # Only basic features (predictions, targets, errors)
-        elif not use_basic_features and use_statistical_features:
-            input_dim = 6  # Only statistical features
-        else:
-            raise ValueError("At least one of use_basic_features or use_statistical_features must be True")
+        input_dim = 0
+        
+        # Hidden representation is always used (default) or when use_pred is False
+        if hidden_dim is not None:
+            input_dim += hidden_dim  # Hidden representation
+        
+        # Predictions are used only when use_pred is True
+        if use_pred and use_basic_features:
+            input_dim += pred_dim * 3  # Predictions, targets, errors
+        
+        # Statistical features
+        if use_statistical_features:
+            input_dim += 6  # MSE, MAE, max_error, min_error, std_error, mean_error
+        
+        if input_dim == 0:
+            raise ValueError("At least one feature type must be enabled")
         
         # Build DNN layers
         layers = []
@@ -66,70 +78,153 @@ class FraudJudgeDNN(nn.Module):
                 batch_first=True
             )
     
-    def extract_features(self, predictions: torch.Tensor, targets: torch.Tensor, 
+    def extract_features(self, predictions: Optional[torch.Tensor] = None, 
+                        targets: Optional[torch.Tensor] = None,
+                        hidden_representation: Optional[torch.Tensor] = None,
                         mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Extract comparison features from predictions and ground truth
+        Extract comparison features from predictions, ground truth, and hidden representation
         
         Args:
-            predictions: [B, T, pred_dim] or [B, pred_dim]
-            targets: [B, T, pred_dim] or [B, pred_dim]  
+            predictions: [B, T, pred_dim] or [B, pred_dim] (optional, used only when use_pred=True)
+            targets: [B, T, pred_dim] or [B, pred_dim] ground truth (required for statistical features)
+            hidden_representation: [B, hidden_dim] or [B, T, hidden_dim] or tuple for LSTM hidden state
             mask: [B, T] or None, valid step markers for sequence data
             
         Returns:
             features: [B, feature_dim] extracted features
         """
-        batch_size = predictions.shape[0]
-        
-        # Handle sequence data: if input is 3D, need aggregation
-        if len(predictions.shape) == 3:  # [B, T, pred_dim]
-            if mask is not None:
-                # Use mask for weighted average
-                valid_steps = mask.sum(dim=1, keepdim=True).clamp_min(1.0)  # [B, 1]
-                pred_agg = (predictions * mask.unsqueeze(-1)).sum(dim=1) / valid_steps  # [B, pred_dim]
-                target_agg = (targets * mask.unsqueeze(-1)).sum(dim=1) / valid_steps  # [B, pred_dim]
+        # Determine batch size from available inputs
+        if hidden_representation is not None:
+            if isinstance(hidden_representation, tuple):
+                batch_size = hidden_representation[0].shape[1]  # LSTM: (h_n, c_n), h_n: [layers, B, hidden]
+            elif len(hidden_representation.shape) == 3:
+                batch_size = hidden_representation.shape[0]
             else:
-                # Simple average
-                pred_agg = predictions.mean(dim=1)  # [B, pred_dim]
-                target_agg = targets.mean(dim=1)  # [B, pred_dim]
-        else:  # [B, pred_dim]
-            pred_agg = predictions
-            target_agg = targets
+                batch_size = hidden_representation.shape[0]
+        elif targets is not None:
+            batch_size = targets.shape[0]
+        elif predictions is not None:
+            batch_size = predictions.shape[0]
+        else:
+            raise ValueError("At least one of predictions, targets, or hidden_representation must be provided")
         
-        # Calculate error features
-        error = pred_agg - target_agg  # [B, pred_dim]
-        
-        # Build feature list based on configuration
         feature_list = []
         
-        # Add basic features if enabled
-        if self.use_basic_features:
-            feature_list.extend([
-                pred_agg,  # [B, pred_dim] predictions
-                target_agg,  # [B, pred_dim] ground truth
-                error,  # [B, pred_dim] error
-            ])
+        # Process hidden representation (always used when available)
+        if hidden_representation is not None:
+            if isinstance(hidden_representation, tuple):
+                # LSTM hidden state: (h_n, c_n) where each is [num_layers * num_directions, B, hidden_size]
+                h_n, c_n = hidden_representation
+                # Take the last layer's hidden state
+                # h_n: [num_layers * num_directions, B, hidden_size]
+                # We take the last layer: h_n[-1] -> [B, hidden_size]
+                hidden_agg = h_n[-1]  # [B, hidden_size]
+            elif len(hidden_representation.shape) == 3:  # [B, T, hidden_dim]
+                if mask is not None:
+                    # Use mask for weighted average
+                    valid_steps = mask.sum(dim=1, keepdim=True).clamp_min(1.0)  # [B, 1]
+                    hidden_agg = (hidden_representation * mask.unsqueeze(-1)).sum(dim=1) / valid_steps  # [B, hidden_dim]
+                else:
+                    # Simple average
+                    hidden_agg = hidden_representation.mean(dim=1)  # [B, hidden_dim]
+            else:  # [B, hidden_dim]
+                hidden_agg = hidden_representation  # [B, hidden_dim]
+            
+            feature_list.append(hidden_agg)  # [B, hidden_dim]
         
-        # Add statistical features if enabled
+        # Process predictions and targets (only when use_pred=True)
+        if self.use_pred and predictions is not None:
+            # Handle sequence data: if input is 3D, need aggregation
+            if len(predictions.shape) == 3:  # [B, T, pred_dim]
+                if mask is not None:
+                    # Use mask for weighted average
+                    valid_steps = mask.sum(dim=1, keepdim=True).clamp_min(1.0)  # [B, 1]
+                    pred_agg = (predictions * mask.unsqueeze(-1)).sum(dim=1) / valid_steps  # [B, pred_dim]
+                    target_agg = (targets * mask.unsqueeze(-1)).sum(dim=1) / valid_steps  # [B, pred_dim]
+                else:
+                    # Simple average
+                    pred_agg = predictions.mean(dim=1)  # [B, pred_dim]
+                    target_agg = targets.mean(dim=1)  # [B, pred_dim]
+            else:  # [B, pred_dim]
+                pred_agg = predictions
+                target_agg = targets
+            
+            # Calculate error features
+            error = pred_agg - target_agg  # [B, pred_dim]
+            
+            # Add basic features
+            if self.use_basic_features:
+                feature_list.extend([
+                    pred_agg,  # [B, pred_dim] predictions
+                    target_agg,  # [B, pred_dim] ground truth
+                    error,  # [B, pred_dim] error
+                ])
+        
+        # Add statistical features if enabled (based on predictions and targets)
         if self.use_statistical_features:
-            abs_error = torch.abs(error)  # [B, pred_dim]
-            
-            # Statistical features
-            mse = (error ** 2).mean(dim=1, keepdim=True)  # [B, 1]
-            mae = abs_error.mean(dim=1, keepdim=True)  # [B, 1]
-            max_error = abs_error.max(dim=1, keepdim=True)[0]  # [B, 1]
-            min_error = abs_error.min(dim=1, keepdim=True)[0]  # [B, 1]
-            std_error = abs_error.std(dim=1, keepdim=True)  # [B, 1]
-            mean_error = abs_error.mean(dim=1, keepdim=True)  # [B, 1]
-            
-            feature_list.extend([
-                mse,  # [B, 1]
-                mae,  # [B, 1]
-                max_error,  # [B, 1]
-                min_error,  # [B, 1]
-                std_error,  # [B, 1]
-                mean_error,  # [B, 1]
-            ])
+            if self.use_pred and predictions is not None and targets is not None:
+                # Calculate error from predictions and targets
+                if len(predictions.shape) == 3:  # [B, T, pred_dim]
+                    if mask is not None:
+                        valid_steps = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+                        pred_agg = (predictions * mask.unsqueeze(-1)).sum(dim=1) / valid_steps
+                        target_agg = (targets * mask.unsqueeze(-1)).sum(dim=1) / valid_steps
+                    else:
+                        pred_agg = predictions.mean(dim=1)
+                        target_agg = targets.mean(dim=1)
+                else:
+                    pred_agg = predictions
+                    target_agg = targets
+                error = pred_agg - target_agg
+                
+                abs_error = torch.abs(error)  # [B, pred_dim]
+                
+                # Statistical features
+                mse = (error ** 2).mean(dim=1, keepdim=True)  # [B, 1]
+                mae = abs_error.mean(dim=1, keepdim=True)  # [B, 1]
+                max_error = abs_error.max(dim=1, keepdim=True)[0]  # [B, 1]
+                min_error = abs_error.min(dim=1, keepdim=True)[0]  # [B, 1]
+                std_error = abs_error.std(dim=1, keepdim=True)  # [B, 1]
+                mean_error = abs_error.mean(dim=1, keepdim=True)  # [B, 1]
+                
+                feature_list.extend([
+                    mse,  # [B, 1]
+                    mae,  # [B, 1]
+                    max_error,  # [B, 1]
+                    min_error,  # [B, 1]
+                    std_error,  # [B, 1]
+                    mean_error,  # [B, 1]
+                ])
+            elif targets is not None:
+                # If not using predictions, calculate statistics based on targets only
+                # (e.g., variance, range, etc. of targets)
+                if len(targets.shape) == 3:  # [B, T, pred_dim]
+                    if mask is not None:
+                        valid_steps = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+                        target_agg = (targets * mask.unsqueeze(-1)).sum(dim=1) / valid_steps
+                    else:
+                        target_agg = targets.mean(dim=1)
+                else:
+                    target_agg = targets
+                
+                # Statistical features based on targets
+                target_abs = torch.abs(target_agg)  # [B, pred_dim]
+                mse = (target_agg ** 2).mean(dim=1, keepdim=True)  # [B, 1]
+                mae = target_abs.mean(dim=1, keepdim=True)  # [B, 1]
+                max_error = target_abs.max(dim=1, keepdim=True)[0]  # [B, 1]
+                min_error = target_abs.min(dim=1, keepdim=True)[0]  # [B, 1]
+                std_error = target_abs.std(dim=1, keepdim=True)  # [B, 1]
+                mean_error = target_abs.mean(dim=1, keepdim=True)  # [B, 1]
+                
+                feature_list.extend([
+                    mse,  # [B, 1]
+                    mae,  # [B, 1]
+                    max_error,  # [B, 1]
+                    min_error,  # [B, 1]
+                    std_error,  # [B, 1]
+                    mean_error,  # [B, 1]
+                ])
         
         # Combine all features
         if feature_list:
@@ -139,39 +234,46 @@ class FraudJudgeDNN(nn.Module):
         
         return features
     
-    def forward(self, predictions: torch.Tensor, targets: torch.Tensor, 
+    def forward(self, predictions: Optional[torch.Tensor] = None, 
+                targets: Optional[torch.Tensor] = None,
+                hidden_representation: Optional[torch.Tensor] = None,
                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Forward propagation
         
         Args:
-            predictions: [B, T, pred_dim] or [B, pred_dim] main model predictions
-            targets: [B, T, pred_dim] or [B, pred_dim] ground truth
+            predictions: [B, T, pred_dim] or [B, pred_dim] main model predictions (optional, used only when use_pred=True)
+            targets: [B, T, pred_dim] or [B, pred_dim] ground truth (required when use_pred=True)
+            hidden_representation: [B, hidden_dim] or [B, T, hidden_dim] or tuple for LSTM hidden state
             mask: [B, T] or None, valid step markers for sequence data
             
         Returns:
             logits: [B, 2] binary classification logits
         """
         # Extract features
-        features = self.extract_features(predictions, targets, mask)
+        features = self.extract_features(predictions, targets, hidden_representation, mask)
         
         # Pass through DNN
         logits = self.dnn(features)
         
         return logits
     
-    def predict_proba(self, predictions: torch.Tensor, targets: torch.Tensor, 
+    def predict_proba(self, predictions: Optional[torch.Tensor] = None, 
+                     targets: Optional[torch.Tensor] = None,
+                     hidden_representation: Optional[torch.Tensor] = None,
                      mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Predict probabilities"""
         with torch.no_grad():
-            logits = self.forward(predictions, targets, mask)
+            logits = self.forward(predictions, targets, hidden_representation, mask)
             return F.softmax(logits, dim=1)
     
-    def predict(self, predictions: torch.Tensor, targets: torch.Tensor, 
+    def predict(self, predictions: Optional[torch.Tensor] = None, 
+               targets: Optional[torch.Tensor] = None,
+               hidden_representation: Optional[torch.Tensor] = None,
                mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Predict classes"""
         with torch.no_grad():
-            logits = self.forward(predictions, targets, mask)
+            logits = self.forward(predictions, targets, hidden_representation, mask)
             return torch.argmax(logits, dim=1)
 
 
@@ -267,14 +369,17 @@ class FraudJudgeTrainer:
             return 0.0
         return self.optimizer.param_groups[0]['lr']
     
-    def train_step(self, predictions: torch.Tensor, targets: torch.Tensor, 
-                   labels: torch.Tensor, mask: Optional[torch.Tensor] = None) -> float:
+    def train_step(self, predictions: Optional[torch.Tensor] = None, 
+                   targets: Optional[torch.Tensor] = None,
+                   labels: torch.Tensor = None,
+                   hidden_representation: Optional[torch.Tensor] = None,
+                   mask: Optional[torch.Tensor] = None) -> float:
         """Single training step"""
         self.model.train()  # Enable dropout and batch norm training mode
         self.optimizer.zero_grad()
         
         # Forward propagation
-        logits = self.model(predictions, targets, mask)
+        logits = self.model(predictions, targets, hidden_representation, mask)
         loss = self.criterion(logits, labels)
         
         # Backward propagation
@@ -283,13 +388,16 @@ class FraudJudgeTrainer:
         
         return loss.item()
     
-    def evaluate(self, predictions: torch.Tensor, targets: torch.Tensor, 
-                 labels: torch.Tensor, mask: Optional[torch.Tensor] = None) -> dict:
+    def evaluate(self, predictions: Optional[torch.Tensor] = None, 
+                 targets: Optional[torch.Tensor] = None,
+                 labels: torch.Tensor = None,
+                 hidden_representation: Optional[torch.Tensor] = None,
+                 mask: Optional[torch.Tensor] = None) -> dict:
         """Evaluate model"""
         self.model.eval()
         
         with torch.no_grad():
-            logits = self.model(predictions, targets, mask)
+            logits = self.model(predictions, targets, hidden_representation, mask)
             loss = self.criterion(logits, labels)
             
             # Calculate accuracy
@@ -311,7 +419,9 @@ class FraudJudgeTrainer:
 def build_judge_model(pred_dim: int, hidden_dims: list = [64, 32, 16], 
                      dropout: float = 0.2, use_attention: bool = False,
                      use_statistical_features: bool = True,
-                     use_basic_features: bool = True) -> FraudJudgeDNN:
+                     use_basic_features: bool = True,
+                     hidden_dim: int = None,
+                     use_pred: bool = False) -> FraudJudgeDNN:
     """Build judgment model"""
     return FraudJudgeDNN(
         pred_dim=pred_dim,
@@ -319,6 +429,8 @@ def build_judge_model(pred_dim: int, hidden_dims: list = [64, 32, 16],
         dropout=dropout,
         use_attention=use_attention,
         use_statistical_features=use_statistical_features,
-        use_basic_features=use_basic_features
+        use_basic_features=use_basic_features,
+        hidden_dim=hidden_dim,
+        use_pred=use_pred
     )
 

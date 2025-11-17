@@ -51,7 +51,7 @@ def print_model_hyperparameters(args):
     model_type = args_dict.get('model_type', 'unknown')
     print(f"  Model Type: {model_type}")
     
-    if model_type in ['transformer', 'fraudenc']:
+    if model_type in ['transformer', 'fraudenc', 'fraudftenc']:
         print(f"  Transformer Dimension: {args_dict.get('transformer_dim', 'N/A')}")
         print(f"  Number of Attention Heads: {args_dict.get('nhead', 'N/A')}")
         print(f"  Number of Encoder Layers: {args_dict.get('num_encoder_layers', 'N/A')}")
@@ -65,6 +65,8 @@ def print_model_hyperparameters(args):
         print(f"  Activation Function: {args_dict.get('activation', 'N/A')}")
         print(f"  Pre-LN (norm_first): {args_dict.get('norm_first', False)}")
         print(f"  Max Sequence Length: {args_dict.get('max_seq_len', 'N/A')}")
+        if model_type == 'fraudftenc':
+            print(f"  Feature-level Token Encoder: Each feature is an independent token")
     else:
         print(f"  LSTM Hidden Dimension: {args_dict.get('lstm_hidden', 'N/A')}")
         print(f"  LSTM Layers: {args_dict.get('lstm_layers', 'N/A')}")
@@ -185,7 +187,7 @@ def evaluate_model(model, test_loader, device, feature_names, target_indices, ar
             X, y, mask = X.to(device), y.to(device), mask.to(device)
             
             # Forward pass
-            preds = model(X, mask, feature_names)
+            preds, hidden_state = model(X, mask, feature_names)
             
             if mask.any():
                 # Calculate regression metrics

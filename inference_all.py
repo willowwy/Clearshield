@@ -6,6 +6,9 @@ python inference_all.py --csv_file path/to/file.csv --sequence_model_path checkp
 If n_predictions = -1, perform inference on all sequences in the file
 '''
 import os
+# Fix OpenMP conflict on Windows
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
 import argparse
 import torch
 import numpy as np
@@ -21,6 +24,7 @@ from src.models.inference import (
 )
 from src.models.load_model import load_seq_model, load_judge_model
 from src.models.datasets import _process_single_dataframe, build_sequences_from_dataframe
+from src.visualization.pred import visualize_inference_results_from_dict
 
 
 def calculate_mse(predictions, targets):
@@ -279,7 +283,7 @@ def infer_single_csv(csv_file, sequence_model_path, judge_model_path, max_len=50
         X, mask = prepare_single_step_data(X_seq, t, max_len)
         
         # Sequence model inference
-        predictions = infer_sequence(sequence_model, X, mask, feature_names, device)
+        predictions, hidden_state = infer_sequence(sequence_model, X, mask, feature_names, device)
         # predictions: [1, T, pred_dim]
         # Get the last step prediction (corresponds to t+1)
         step_pred = predictions[0, -1, :].cpu().numpy()  # [pred_dim]
@@ -304,8 +308,17 @@ def infer_single_csv(csv_file, sequence_model_path, judge_model_path, max_len=50
         mse = calculate_mse(step_pred_selected, target_features)
         all_mse.append(mse)
         
+        # Process hidden state for judge model
+        # For LSTM: take last layer's hidden state
+        # For Transformer: take last time step
+        if isinstance(hidden_state, tuple):
+            h_n, c_n = hidden_state
+            hidden_rep = h_n[-1]  # [1, hidden_size]
+        else:
+            hidden_rep = hidden_state[:, -1, :]  # [1, hidden_dim] - last time step
+        
         # Judge model inference
-        fraud_prob, is_fraud = infer_judge(judge_model, step_pred_selected, target_features, device)
+        fraud_prob, is_fraud = infer_judge(judge_model, step_pred_selected, target_features, device, hidden_rep)
         
         # Save results
         step_result = {
@@ -396,6 +409,24 @@ def infer_single_csv(csv_file, sequence_model_path, judge_model_path, max_len=50
                 f.write(f"  Fraud probability: {step_result['judge_model']['fraud_probability']:.4f}\n")
                 f.write(f"  Judgment: {step_result['judge_model']['judgment']}\n")
         print(f"Summary saved to: {output_txt}")
+        
+        # Generate visualization
+        try:
+            output_viz = os.path.join(output_dir, f"{csv_stem}_visualization.png")
+            # Remove existing file if it exists to ensure overwrite
+            if os.path.exists(output_viz):
+                os.remove(output_viz)
+            fig = visualize_inference_results_from_dict(
+                results_dict=result_dict,
+                output_path=output_viz,
+                figsize=(15, 10),
+                dpi=100
+            )
+            # Close figure to free memory
+            import matplotlib.pyplot as plt
+            plt.close(fig)
+        except Exception as e:
+            print(f"Warning: Failed to generate visualization: {e}")
     
     return result_dict
 

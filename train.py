@@ -101,9 +101,9 @@ def train_epoch(model, train_loader, optimizer, criterion, device, feature_names
             # Forward pass to get sequence predictions [B,T,pred_dim]
             if use_amp and scaler is not None:
                 with autocast():
-                    preds = model(X, mask, feature_names)
+                    preds, hidden_state = model(X, mask, feature_names)
             else:
-                preds = model(X, mask, feature_names)
+                preds, hidden_state = model(X, mask, feature_names)
             
             # Log model output info (only for first batch)
             if batch_idx == 0:
@@ -165,7 +165,7 @@ def evaluate(model, val_loader, criterion, device, feature_names, target_indices
             X, y, mask = X.to(device), y.to(device), mask.to(device)
             
             # Forward pass
-            preds = model(X, mask, feature_names)
+            preds, hidden_state = model(X, mask, feature_names)
 
             if mask.any():
                 pred_steps = preds[:, :-1, :]
@@ -198,7 +198,7 @@ def test_model(model, test_loader, criterion, device, feature_names, target_indi
             X, y, mask = X.to(device), y.to(device), mask.to(device)
             
             # Forward pass
-            preds = model(X, mask, feature_names)
+            preds, hidden_state = model(X, mask, feature_names)
 
             if mask.any():
                 pred_steps = preds[:, :-1, :]

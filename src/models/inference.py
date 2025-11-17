@@ -149,26 +149,28 @@ def infer_sequence(sequence_model, X, mask, feature_names, device):
     
     Returns:
         predictions: [1, T, pred_dim] Prediction results
+        hidden_state: Hidden state from sequence model (tuple for LSTM or tensor for Transformer)
     """
     sequence_model.eval()
     X = X.to(device)
     mask = mask.to(device)
     
     with torch.no_grad():
-        predictions = sequence_model(X, mask, feature_names, use_pack=False)
+        predictions, hidden_state = sequence_model(X, mask, feature_names, use_pack=False)
     
-    return predictions
+    return predictions, hidden_state
 
 
-def infer_judge(judge_model, predictions, targets, device):
+def infer_judge(judge_model, predictions, targets, device, hidden_representation=None):
     """
     Use judge model to determine if it is fraud
     
     Args:
         judge_model: Judge model
-        predictions: [pred_dim] Sequence model prediction for last step
+        predictions: [pred_dim] Sequence model prediction for last step (optional, used only when use_pred=True)
         targets: [pred_dim] Ground truth for last step
         device: Device
+        hidden_representation: Hidden state from sequence model (tuple for LSTM or tensor for Transformer)
     
     Returns:
         fraud_prob: Fraud probability
@@ -177,11 +179,30 @@ def infer_judge(judge_model, predictions, targets, device):
     judge_model.eval()
     
     # Convert to tensor and add batch dimension
-    predictions = torch.tensor(predictions, dtype=torch.float32).unsqueeze(0).to(device)  # [1, pred_dim]
     targets = torch.tensor(targets, dtype=torch.float32).unsqueeze(0).to(device)  # [1, pred_dim]
     
+    # Process predictions if provided
+    pred_tensor = None
+    if predictions is not None:
+        pred_tensor = torch.tensor(predictions, dtype=torch.float32).unsqueeze(0).to(device)  # [1, pred_dim]
+    
+    # Process hidden representation
+    hidden_tensor = None
+    if hidden_representation is not None:
+        if isinstance(hidden_representation, tuple):
+            # LSTM: (h_n, c_n) where h_n: [num_layers * num_directions, B, hidden_size]
+            # Take the last layer's hidden state
+            h_n, c_n = hidden_representation
+            hidden_tensor = h_n[-1]  # [B, hidden_size] -> [1, hidden_size] for single sample
+        elif len(hidden_representation.shape) == 3:
+            # Transformer: [B, T, hidden_dim], take the last time step
+            hidden_tensor = hidden_representation[:, -1, :]  # [B, hidden_dim] -> [1, hidden_dim] for single sample
+        else:
+            # Already [B, hidden_dim]
+            hidden_tensor = hidden_representation
+    
     with torch.no_grad():
-        logits = judge_model(predictions, targets)  # [1, 2]
+        logits = judge_model(pred_tensor, targets, hidden_tensor)  # [1, 2]
         probs = torch.softmax(logits, dim=1)  # [1, 2]
         fraud_prob = probs[0, 1].item()  # Fraud probability
         is_fraud = torch.argmax(logits, dim=1)[0].item() == 1
@@ -247,7 +268,7 @@ def main():
     print("\n" + "="*60)
     print("Sequence model inference")
     print("="*60)
-    predictions = infer_sequence(sequence_model, X, mask, feature_names, device)
+    predictions, hidden_state = infer_sequence(sequence_model, X, mask, feature_names, device)
     print(f"Prediction shape: {predictions.shape}")
     
     # Get prediction for last step (corresponding to last row)
@@ -291,7 +312,16 @@ def main():
     print("\n" + "="*60)
     print("Judge model inference")
     print("="*60)
-    fraud_prob, is_fraud = infer_judge(judge_model, last_step_pred_selected, last_row_target, device)
+    # Process hidden state for judge model
+    # For LSTM: take last layer's hidden state
+    # For Transformer: take last time step
+    if isinstance(hidden_state, tuple):
+        h_n, c_n = hidden_state
+        hidden_rep = h_n[-1]  # [1, hidden_size]
+    else:
+        hidden_rep = hidden_state[:, -1, :]  # [1, hidden_dim] - last time step
+    
+    fraud_prob, is_fraud = infer_judge(judge_model, last_step_pred_selected, last_row_target, device, hidden_rep)
     
     # Output results
     print("\n" + "="*60)

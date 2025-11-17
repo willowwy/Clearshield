@@ -257,14 +257,17 @@ class TimeCatLSTM(nn.Module):
         if use_pack:
             lengths = mask.sum(dim=1).long().clamp_min(1)
             packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
-            packed_out, _ = self.lstm(packed)
+            packed_out, (h_n, c_n) = self.lstm(packed)
             out, _ = pad_packed_sequence(packed_out, batch_first=True, total_length=x.size(1))
+            # For packed sequences, hidden state is the last valid hidden state
+            hidden_state = (h_n, c_n)
         else:
-            out, _ = self.lstm(x)
+            out, (h_n, c_n) = self.lstm(x)
+            hidden_state = (h_n, c_n)
 
         # Time-distributed linear to produce per-step predictions [B, T, pred_dim]
         preds = self.head(out)
-        return preds
+        return preds, hidden_state
 
 
 class FraudEnc(nn.Module):
@@ -467,15 +470,257 @@ class FraudEnc(nn.Module):
         
         # Prediction head
         preds = self.head(out)  # [B, T, pred_dim]
-        return preds
+        # Hidden state is the transformer encoder output
+        hidden_state = out  # [B, T, transformer_dim]
+        return preds, hidden_state
+
+
+class FraudFTEnc(nn.Module):
+    """Feature-level Token Encoder: each feature is an independent token."""
+    
+    def __init__(self, args: argparse.Namespace):
+        super().__init__()
+        
+        # Embedding dropout
+        self.embedding_dropout = getattr(args, 'embedding_dropout', 0.0)
+        self.emb_dropout = nn.Dropout(self.embedding_dropout) if self.embedding_dropout > 0 else nn.Identity()
+        
+        # Time embeddings (same as FraudEnc)
+        self.post_day_emb = nn.Embedding(args.day_vocab, args.day_emb_dim)
+        self.post_hour_emb = nn.Embedding(args.hour_vocab, args.hour_emb_dim)
+        self.post_min_emb = nn.Embedding(args.minute_vocab, args.minute_emb_dim)
+        self.open_day_emb = nn.Embedding(args.aod_day_vocab, args.aod_day_emb_dim)
+        
+        # Categorical embeddings (same as FraudEnc)
+        self.cat_embs = nn.ModuleDict()
+        
+        # Configure categorical embeddings based on feature names
+        if hasattr(args, 'feature_names') and args.feature_names:
+            for name in args.feature_names:
+                if name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized", "cluster_id"]:
+                    if name == "Member Age":
+                        vocab, emb = 10, 10
+                    elif name == "Amount":
+                        vocab, emb = 12, 10
+                    elif name == "is_int":
+                        vocab, emb = 2, 4
+                    elif name == "account_age_quantized":
+                        vocab, emb = 5, 5
+                    elif name == "cluster_id":
+                        vocab, emb = 60, 32
+                    elif "Account Type" in name:
+                        vocab, emb = 15, 16
+                    elif "Product ID" in name:
+                        vocab, emb = 160, 32
+                    elif "Action Type" in name:
+                        vocab, emb = 5, 5
+                    elif "Source Type" in name:
+                        vocab, emb = 20, 16
+                    else:
+                        vocab, emb = 50, 4
+                    
+                    self.cat_embs[name] = nn.Embedding(vocab, emb)
+        
+        # Transformer embedding dimension
+        transformer_dim = getattr(args, 'transformer_dim', args.lstm_hidden if hasattr(args, 'lstm_hidden') else 128)
+        
+        # Feature-level projection layers: each feature gets its own projection
+        self.time_feature_projs = nn.ModuleDict()
+        self.cat_feature_projs = nn.ModuleDict()
+        self.cont_feature_projs = nn.ModuleList()
+        
+        # Count features and create projections
+        num_features = len(getattr(args, 'feature_names', []) or [])
+        
+        if hasattr(args, 'feature_names') and args.feature_names:
+            for name in args.feature_names:
+                if name in ["Post Date_doy", "Post Time_hour", "Post Time_minute", "Account Open Date_doy"]:
+                    # Time feature: get embedding dim
+                    if name == "Post Date_doy":
+                        emb_dim = args.day_emb_dim
+                    elif name == "Post Time_hour":
+                        emb_dim = args.hour_emb_dim
+                    elif name == "Post Time_minute":
+                        emb_dim = args.minute_emb_dim
+                    elif name == "Account Open Date_doy":
+                        emb_dim = args.aod_day_emb_dim
+                    self.time_feature_projs[name] = nn.Linear(emb_dim, transformer_dim)
+                elif name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized", "cluster_id"]:
+                    # Categorical feature: get embedding dim
+                    if name in self.cat_embs:
+                        emb_dim = self.cat_embs[name].embedding_dim
+                    else:
+                        emb_dim = 4  # default
+                    self.cat_feature_projs[name] = nn.Linear(emb_dim, transformer_dim)
+                else:
+                    # Continuous feature: project from 1 dim
+                    self.cont_feature_projs.append(nn.Linear(1, transformer_dim))
+        
+        # Positional embeddings: separate time position and feature position
+        max_seq_len = getattr(args, 'max_seq_len', 512)
+        self.time_pos_emb = nn.Embedding(max_seq_len, transformer_dim)  # Time step position
+        self.feature_pos_emb = nn.Embedding(num_features, transformer_dim)  # Feature position
+        
+        # Feature type embedding: each feature gets its own embedding to identify which feature it is
+        self.feature_emb = nn.Embedding(num_features, transformer_dim)
+        
+        # Multi-layer Transformer Encoder (same as FraudEnc)
+        dim_feedforward = getattr(args, 'dim_feedforward', 0)
+        if dim_feedforward == 0:
+            dim_feedforward = transformer_dim * 2
+        
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=transformer_dim,
+            nhead=getattr(args, 'nhead', 3),
+            dim_feedforward=dim_feedforward,
+            dropout=getattr(args, 'dropout', 0.1),
+            activation=getattr(args, 'activation', 'relu'),
+            batch_first=True,
+            norm_first=getattr(args, 'norm_first', False),
+        )
+        num_encoder_layers = getattr(args, 'num_encoder_layers', 1)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
+        
+        # Prediction head (same as FraudEnc)
+        inferred_pred_dim = getattr(args, 'pred_dim', 0)
+        target_names = getattr(args, 'target_names', []) or []
+        if not inferred_pred_dim:
+            if target_names:
+                inferred_pred_dim = len(target_names)
+            else:
+                inferred_pred_dim = len(getattr(args, 'feature_names', []) or [])
+        self.pred_dim = inferred_pred_dim
+        self.target_names = target_names if target_names else (getattr(args, 'feature_names', []) or [])
+        self.head = nn.Linear(transformer_dim, self.pred_dim)
+        
+        # Store transformer_dim and num_features for forward pass
+        self.transformer_dim = transformer_dim
+        self.num_features = num_features
+        
+    def forward(
+        self,
+        x: torch.Tensor,             # [B, T, total_feature_dim]
+        mask: torch.Tensor,          # [B, T]
+        feature_names: list,         # feature names list to split feature types
+        use_pack: bool = True,       # Not used for transformer, kept for compatibility
+    ) -> torch.Tensor:
+        # Separate different types of features from feature names
+        time_features = {}
+        categorical_features = {}
+        continuous_feature_indices = {}  # Map feature name to (index, feature_values)
+        feature_order = []  # Track feature order for token sequence
+        
+        for i, name in enumerate(feature_names):
+            feature_values = x[:, :, i]
+            feature_order.append(name)
+            
+            if name in ["Post Date_doy", "Post Time_hour", "Post Time_minute", "Account Open Date_doy"]:
+                time_features[name] = feature_values.long()
+            elif name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized", "cluster_id"]:
+                clamped_values = torch.clamp(feature_values, min=0).long()
+                categorical_features[name] = clamped_values
+            else:
+                continuous_feature_indices[name] = i
+        
+        # Ensure all time features are non-negative and within valid ranges
+        post_date_doy = torch.clamp(time_features["Post Date_doy"], min=0, max=365)
+        post_time_hour = torch.clamp(time_features["Post Time_hour"], min=0, max=23)
+        post_time_minute = torch.clamp(time_features["Post Time_minute"], min=0, max=59)
+        account_open_doy = torch.clamp(time_features["Account Open Date_doy"], min=0, max=365)
+        
+        # Feature-level tokenization: each feature becomes an independent token
+        feature_tokens = []
+        cont_idx = 0
+        
+        for name in feature_order:
+            if name in ["Post Date_doy", "Post Time_hour", "Post Time_minute", "Account Open Date_doy"]:
+                # Time feature: embed and project
+                if name == "Post Date_doy":
+                    emb = self.post_day_emb(post_date_doy)  # [B, T, day_emb_dim]
+                elif name == "Post Time_hour":
+                    emb = self.post_hour_emb(post_time_hour)  # [B, T, hour_emb_dim]
+                elif name == "Post Time_minute":
+                    emb = self.post_min_emb(post_time_minute)  # [B, T, minute_emb_dim]
+                elif name == "Account Open Date_doy":
+                    emb = self.open_day_emb(account_open_doy)  # [B, T, aod_day_emb_dim]
+                
+                emb = self.emb_dropout(emb.float())
+                token = self.time_feature_projs[name](emb)  # [B, T, transformer_dim]
+                feature_tokens.append(token)
+                
+            elif name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized", "cluster_id"]:
+                # Categorical feature: embed and project
+                if name in categorical_features and name in self.cat_embs:
+                    final_values = torch.clamp(categorical_features[name], min=0, max=self.cat_embs[name].num_embeddings-1)
+                    emb = self.cat_embs[name](final_values)  # [B, T, cat_emb_dim]
+                    emb = self.emb_dropout(emb.float())
+                    token = self.cat_feature_projs[name](emb)  # [B, T, transformer_dim]
+                    feature_tokens.append(token)
+                    
+            else:
+                # Continuous feature: project directly
+                feat_idx = continuous_feature_indices[name]
+                cont_feat = x[:, :, feat_idx:feat_idx+1]  # [B, T, 1]
+                token = self.cont_feature_projs[cont_idx](cont_feat)  # [B, T, transformer_dim]
+                feature_tokens.append(token)
+                cont_idx += 1
+        
+        # Build token sequence: [B, T*F, transformer_dim]
+        # Stack all feature tokens along time dimension, then reshape
+        B, T, _ = feature_tokens[0].shape
+        F = len(feature_tokens)
+        
+        # Concatenate all feature tokens: [B, T, F, transformer_dim]
+        tokens_3d = torch.stack(feature_tokens, dim=2)  # [B, T, F, transformer_dim]
+        # Reshape to [B, T*F, transformer_dim]
+        tokens_flat = tokens_3d.reshape(B, T * F, self.transformer_dim)
+        
+        # Separate positional embeddings: time position and feature position
+        B, T_F, _ = tokens_flat.shape
+        
+        # Compute time positions and feature positions for each token
+        # Token at position i corresponds to time_idx = i // F, feature_idx = i % F
+        time_positions = torch.arange(0, T, device=tokens_flat.device).unsqueeze(0).expand(B, -1)  # [B, T]
+        time_positions_expanded = time_positions.unsqueeze(-1).expand(-1, -1, F).reshape(B, T * F)  # [B, T*F]
+        time_pos_embeddings = self.time_pos_emb(time_positions_expanded)  # [B, T*F, transformer_dim]
+        
+        feature_positions = torch.arange(0, F, device=tokens_flat.device).unsqueeze(0).expand(T, -1)  # [T, F]
+        feature_positions_expanded = feature_positions.reshape(T * F).unsqueeze(0).expand(B, -1)  # [B, T*F]
+        feature_pos_embeddings = self.feature_pos_emb(feature_positions_expanded)  # [B, T*F, transformer_dim]
+        
+        # Feature type embeddings: identify which feature each token represents
+        feature_indices = torch.arange(0, F, device=tokens_flat.device).unsqueeze(0).expand(T, -1)  # [T, F]
+        feature_indices_expanded = feature_indices.reshape(T * F).unsqueeze(0).expand(B, -1)  # [B, T*F]
+        feature_type_embeddings = self.feature_emb(feature_indices_expanded)  # [B, T*F, transformer_dim]
+        
+        # Combine all embeddings: token + time_pos + feature_pos + feature_type
+        tokens_with_pos = tokens_flat + time_pos_embeddings + feature_pos_embeddings + feature_type_embeddings
+        
+        # Expand mask: [B, T] -> [B, T*F]
+        # Each time step's mask is replicated F times
+        mask_expanded = mask.unsqueeze(-1).expand(-1, -1, F).reshape(B, T * F)  # [B, T*F]
+        attention_mask = (mask_expanded == 0).bool()  # [B, T*F], True where padding
+        
+        # Pass through transformer encoder
+        out = self.transformer(tokens_with_pos, src_key_padding_mask=attention_mask)  # [B, T*F, transformer_dim]
+        
+        # Aggregate feature tokens back to time steps: [B, T*F, transformer_dim] -> [B, T, transformer_dim]
+        out_3d = out.reshape(B, T, F, self.transformer_dim)  # [B, T, F, transformer_dim]
+        out_agg = out_3d.mean(dim=2)  # [B, T, transformer_dim] - average pooling over features
+        
+        # Prediction head
+        preds = self.head(out_agg)  # [B, T, pred_dim]
+        # Hidden state is the aggregated transformer encoder output
+        hidden_state = out_agg  # [B, T, transformer_dim]
+        return preds, hidden_state
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Time+Category Embedding LSTM (binary)")
     
     # Model type selection
-    p.add_argument("--model_type", type=str, default="transformer", choices=["lstm", "transformer", "fraudenc"], 
-                   help="Model type: lstm, transformer, or fraudenc")
+    p.add_argument("--model_type", type=str, default="fraudftenc", choices=["lstm", "transformer", "fraudenc", "fraudftenc"], 
+                   help="Model type: lstm, transformer, fraudenc, or fraudftenc")
     
     # Continuous feature dimension (needs to match data)
     p.add_argument("--cont_dim", type=int, default=1, help="Continuous feature dimension")
@@ -511,7 +756,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--num_encoder_layers", type=int, default=2, help="Number of transformer encoder layers")
     p.add_argument("--dim_feedforward", type=int, default=0, help="Feedforward dimension (0 = 2 * transformer_dim)")
     p.add_argument("--activation", type=str, default="relu", help="Activation function (relu/gelu)")
-    p.add_argument("--norm_first", action="store_true", help="Apply normalization before attention/ffn (Pre-LN)")
+    p.add_argument("--norm_first", action="store_true", default = True, help="Apply normalization before attention/ffn (Pre-LN)")
     p.add_argument("--max_seq_len", type=int, default=512, help="Maximum sequence length for positional embeddings")
 
     # Training related (optional)
@@ -527,6 +772,8 @@ def build_seq_model(args: argparse.Namespace):
     model_type = getattr(args, 'model_type', 'lstm').lower()
     if model_type == 'transformer' or model_type == 'fraudenc':
         return FraudEnc(args)
+    elif model_type == 'fraudftenc':
+        return FraudFTEnc(args)
     else:
         return TimeCatLSTM(args)
 
@@ -600,7 +847,7 @@ if __name__ == "__main__":
     # Run inference
     model.eval()
     with torch.no_grad():
-        preds = model(X, mask, args.feature_names, use_pack=False)  # [B,T,pred_dim]
+        preds, hidden_state = model(X, mask, args.feature_names, use_pack=False)  # [B,T,pred_dim]
         print("Preds shape:", tuple(preds.shape))
         # Show first 3 dimensions of predictions for first two time steps
         print("Preds[0, :2, :3]:\n", preds[0, :2, :3])

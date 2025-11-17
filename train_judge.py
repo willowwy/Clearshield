@@ -48,29 +48,35 @@ def resolve_target_indices(feature_names, model_args):
     return target_indices, resolved_target_names, target_names
 
 
-def extract_judge_training_data(sequence_model, dataloader, device, feature_names, target_indices, target_names):
+def extract_judge_training_data(sequence_model, dataloader, device, feature_names, target_indices, target_names, use_pred=False):
     """
-    Extract training data for judge model using sequence model predictions
+    Extract training data for judge model using sequence model predictions and hidden states
+    
+    Args:
+        use_pred: If True, also extract predictions; if False, only use hidden representation
     
     Returns:
-        predictions: [N, pred_dim] - sequence model predictions
+        predictions: [N, pred_dim] - sequence model predictions (None if use_pred=False)
         targets: [N, pred_dim] - ground truth targets  
+        hidden_states: [N, hidden_dim] - hidden representations
         labels: [N] - fraud labels (0/1)
     """
     sequence_model.eval()
     
     all_predictions = []
     all_targets = []
+    all_hidden_states = []
     all_labels = []
     
     print("Extracting training data for judge model...")
+    print(f"Using predictions: {use_pred}")
     
     with torch.no_grad():
         for batch_idx, (X, y, mask) in enumerate(tqdm(dataloader, desc="Extracting data")):
             X, y, mask = X.to(device), y.to(device), mask.to(device)
             
-            # Get sequence model predictions
-            preds = sequence_model(X, mask, feature_names)
+            # Get sequence model predictions and hidden states
+            preds, hidden_state = sequence_model(X, mask, feature_names)
             
             # Align predictions with next-step targets
             pred_steps = preds[:, :-1, :]  # [B, T-1, full_pred_dim]
@@ -95,31 +101,58 @@ def extract_judge_training_data(sequence_model, dataloader, device, feature_name
             valid_steps = mask[:, 1:]  # [B, T-1]
             label_steps = y[:, 1:]  # [B, T-1]
             
+            # Process hidden state
+            # For LSTM: hidden_state is (h_n, c_n) where h_n: [num_layers * num_directions, B, hidden_size]
+            # For Transformer: hidden_state is [B, T, transformer_dim]
+            if isinstance(hidden_state, tuple):
+                # LSTM: take last layer's hidden state
+                h_n, c_n = hidden_state
+                hidden_rep = h_n[-1]  # [B, hidden_size]
+                # Expand to match sequence length: [B, hidden_size] -> [B, T-1, hidden_size]
+                # Use the same hidden state for all time steps (or we could use the last valid step)
+                hidden_steps = hidden_rep.unsqueeze(1).expand(-1, pred_steps.shape[1], -1)  # [B, T-1, hidden_size]
+            else:
+                # Transformer: hidden_state is [B, T, transformer_dim]
+                # Take steps corresponding to predictions (excluding last step)
+                hidden_steps = hidden_state[:, :-1, :]  # [B, T-1, transformer_dim]
+            
             # Only keep valid steps
             valid_mask = valid_steps == 1
             if valid_mask.any():
-                # Flatten valid predictions and targets
-                pred_valid = pred_steps[valid_mask].cpu().numpy()  # [N, pred_dim]
+                # Flatten valid data
                 target_valid = target_steps[valid_mask].cpu().numpy()  # [N, pred_dim]
                 label_valid = label_steps[valid_mask].cpu().numpy()  # [N]
+                hidden_valid = hidden_steps[valid_mask].cpu().numpy()  # [N, hidden_dim]
                 
-                all_predictions.append(pred_valid)
+                if use_pred:
+                    pred_valid = pred_steps[valid_mask].cpu().numpy()  # [N, pred_dim]
+                    all_predictions.append(pred_valid)
+                
                 all_targets.append(target_valid)
+                all_hidden_states.append(hidden_valid)
                 all_labels.append(label_valid)
     
     # Concatenate all data
-    if all_predictions:
-        predictions = np.concatenate(all_predictions, axis=0)
+    if all_targets:
         targets = np.concatenate(all_targets, axis=0)
+        hidden_states = np.concatenate(all_hidden_states, axis=0)
         labels = np.concatenate(all_labels, axis=0)
         
-        print(f"Extracted {len(predictions)} samples for judge training")
-        print(f"Fraud rate: {np.mean(labels):.4f}")
+        if use_pred and all_predictions:
+            predictions = np.concatenate(all_predictions, axis=0)
+        else:
+            predictions = None
         
-        return predictions, targets, labels
+        print(f"Extracted {len(targets)} samples for judge training")
+        print(f"Fraud rate: {np.mean(labels):.4f}")
+        print(f"Hidden state shape: {hidden_states.shape}")
+        if predictions is not None:
+            print(f"Predictions shape: {predictions.shape}")
+        
+        return predictions, targets, hidden_states, labels
     else:
         print("No valid data extracted!")
-        return None, None, None
+        return None, None, None, None
 
 
 def filter_fraud_batches(dataloader, min_fraud_rate=0.1):
@@ -151,10 +184,10 @@ def filter_fraud_batches(dataloader, min_fraud_rate=0.1):
     return fraud_batches
 
 
-def create_judge_dataset(predictions, targets, labels, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1, seed=42):
+def create_judge_dataset(predictions, targets, hidden_states, labels, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1, seed=42):
     """Create train/val/test splits for judge model"""
     np.random.seed(seed)
-    n_samples = len(predictions)
+    n_samples = len(targets)
     indices = np.random.permutation(n_samples)
     
     n_train = int(n_samples * train_ratio)
@@ -165,9 +198,18 @@ def create_judge_dataset(predictions, targets, labels, train_ratio=0.8, val_rati
     test_idx = indices[n_train + n_val:]
     
     return {
-        'train': (predictions[train_idx], targets[train_idx], labels[train_idx]),
-        'val': (predictions[val_idx], targets[val_idx], labels[val_idx]),
-        'test': (predictions[test_idx], targets[test_idx], labels[test_idx])
+        'train': (predictions[train_idx] if predictions is not None else None, 
+                  targets[train_idx], 
+                  hidden_states[train_idx],
+                  labels[train_idx]),
+        'val': (predictions[val_idx] if predictions is not None else None, 
+                targets[val_idx], 
+                hidden_states[val_idx],
+                labels[val_idx]),
+        'test': (predictions[test_idx] if predictions is not None else None, 
+                 targets[test_idx], 
+                 hidden_states[test_idx],
+                 labels[test_idx])
     }
 
 
@@ -208,17 +250,22 @@ def train_judge_model(judge_model, train_data, val_data, device, args):
     else:
         print(f"No learning rate scheduler (initial LR={trainer.get_lr():.6f})")
     
-    train_pred, train_target, train_labels = train_data
-    val_pred, val_target, val_labels = val_data
+    train_pred, train_target, train_hidden, train_labels = train_data
+    val_pred, val_target, val_hidden, val_labels = val_data
     
     # Convert to tensors
-    train_pred = torch.tensor(train_pred, dtype=torch.float32).to(device)
     train_target = torch.tensor(train_target, dtype=torch.float32).to(device)
+    train_hidden = torch.tensor(train_hidden, dtype=torch.float32).to(device)
     train_labels = torch.tensor(train_labels, dtype=torch.long).to(device)
     
-    val_pred = torch.tensor(val_pred, dtype=torch.float32).to(device)
     val_target = torch.tensor(val_target, dtype=torch.float32).to(device)
+    val_hidden = torch.tensor(val_hidden, dtype=torch.float32).to(device)
     val_labels = torch.tensor(val_labels, dtype=torch.long).to(device)
+    
+    if train_pred is not None:
+        train_pred = torch.tensor(train_pred, dtype=torch.float32).to(device)
+    if val_pred is not None:
+        val_pred = torch.tensor(val_pred, dtype=torch.float32).to(device)
     
     # Training loop
     best_val_acc = 0.0
@@ -235,16 +282,17 @@ def train_judge_model(judge_model, train_data, val_data, device, args):
         
         # Mini-batch training
         batch_size = args.judge_batch_size
-        n_train = len(train_pred)
+        n_train = len(train_target)
         
         for i in range(0, n_train, batch_size):
             end_idx = min(i + batch_size, n_train)
             
-            batch_pred = train_pred[i:end_idx]
             batch_target = train_target[i:end_idx]
+            batch_hidden = train_hidden[i:end_idx]
             batch_labels = train_labels[i:end_idx]
+            batch_pred = train_pred[i:end_idx] if train_pred is not None else None
             
-            loss = trainer.train_step(batch_pred, batch_target, batch_labels)
+            loss = trainer.train_step(batch_pred, batch_target, batch_labels, batch_hidden)
             epoch_loss += loss
             num_batches += 1
         
@@ -253,7 +301,7 @@ def train_judge_model(judge_model, train_data, val_data, device, args):
         
         # Validation
         judge_model.eval()
-        val_results = trainer.evaluate(val_pred, val_target, val_labels)
+        val_results = trainer.evaluate(val_pred, val_target, val_labels, val_hidden)
         val_acc = val_results['accuracy']
         val_accuracies.append(val_acc)
         
@@ -271,7 +319,7 @@ def train_judge_model(judge_model, train_data, val_data, device, args):
                 'model_state_dict': judge_model.state_dict(),
                 'val_accuracy': val_acc,
                 'args': args
-            }, f'checkpoints/best_judge_model.pth')
+            }, f'checkpoints-enc/best_judge_model.pth')
         
         if epoch % 10 == 0:
             current_lr = trainer.get_lr()
@@ -291,17 +339,19 @@ def train_judge_model(judge_model, train_data, val_data, device, args):
 
 def evaluate_judge_model(judge_model, test_data, device):
     """Evaluate the judge model"""
-    test_pred, test_target, test_labels = test_data
+    test_pred, test_target, test_hidden, test_labels = test_data
     
     # Convert to tensors
-    test_pred = torch.tensor(test_pred, dtype=torch.float32).to(device)
     test_target = torch.tensor(test_target, dtype=torch.float32).to(device)
+    test_hidden = torch.tensor(test_hidden, dtype=torch.float32).to(device)
     test_labels = torch.tensor(test_labels, dtype=torch.long).to(device)
+    if test_pred is not None:
+        test_pred = torch.tensor(test_pred, dtype=torch.float32).to(device)
     
     # Evaluate
     judge_model.eval()
     with torch.no_grad():
-        logits = judge_model(test_pred, test_target)
+        logits = judge_model(test_pred, test_target, test_hidden)
         probs = torch.softmax(logits, dim=1)
         pred_labels = torch.argmax(logits, dim=1)
         
@@ -457,6 +507,8 @@ def main():
                        help="Train judge model without statistical features (only predictions, targets, and errors)")
     parser.add_argument("--stat-only", action="store_true",
                        help="Train judge model using only statistical features (MSE, MAE, max_error, min_error, std_error, mean_error)")
+    parser.add_argument("--use_pred", action="store_true",
+                       help="Use predictions in addition to hidden representation (default: only use hidden representation)")
     
     args = parser.parse_args()
     
@@ -531,25 +583,39 @@ def main():
     fraud_dataloader = torch.utils.data.DataLoader(fraud_dataset, batch_size=1, shuffle=False, collate_fn=lambda x: x[0])
     
     # Extract training data using sequence model
-    predictions, targets, labels = extract_judge_training_data(
-        sequence_model, fraud_dataloader, device, feature_names, target_indices, target_names
+    predictions, targets, hidden_states, labels = extract_judge_training_data(
+        sequence_model, fraud_dataloader, device, feature_names, target_indices, target_names, use_pred=args.use_pred
     )
     
-    if predictions is None:
+    if targets is None:
         print("No valid training data extracted!")
         return
     
     # Create train/val/test splits
     dataset_splits = create_judge_dataset(
-        predictions, targets, labels,
+        predictions, targets, hidden_states, labels,
         args.train_ratio, args.val_ratio, args.test_ratio, args.seed
     )
     
     print(f"Dataset splits:")
-    for split_name, (pred, target, label) in dataset_splits.items():
-        if len(pred) > 0:
+    for split_name, (pred, target, hidden, label) in dataset_splits.items():
+        if len(target) > 0:
             fraud_rate = np.mean(label)
-            print(f"  {split_name}: {len(pred)} samples, fraud rate: {fraud_rate:.4f}")
+            print(f"  {split_name}: {len(target)} samples, fraud rate: {fraud_rate:.4f}")
+    
+    # Determine hidden_dim from sequence model
+    # For LSTM: hidden_dim = lstm_hidden * (2 if bidirectional else 1)
+    # For Transformer: hidden_dim = transformer_dim
+    model_type = getattr(model_args, 'model_type', 'lstm').lower()
+    if model_type == 'lstm':
+        lstm_hidden = getattr(model_args, 'lstm_hidden', 128)
+        bidirectional = getattr(model_args, 'bidirectional', False)
+        hidden_dim = lstm_hidden * (2 if bidirectional else 1)
+    else:
+        # Transformer models
+        hidden_dim = getattr(model_args, 'transformer_dim', 128)
+    
+    print(f"Sequence model hidden dimension: {hidden_dim}")
     
     # Build or load judge model
     if args.judge_model_path is not None:
@@ -573,27 +639,15 @@ def main():
         pred_dim = len(target_indices)
         
         # Determine feature configuration
-        if args.stat_only:
-            use_statistical_features = True
-            use_basic_features = False
-            input_dim = 6  # Only statistical features
-            print(f"Judge model configuration:")
-            print(f"  Mode: STAT-ONLY (only statistical features)")
-            print(f"  Input dimension: {input_dim}")
-        elif args.no_stat:
-            use_statistical_features = False
-            use_basic_features = True
-            input_dim = pred_dim * 3  # Only basic features
-            print(f"Judge model configuration:")
-            print(f"  Mode: NO-STAT (only basic features)")
-            print(f"  Input dimension: {input_dim}")
-        else:
-            use_statistical_features = True
-            use_basic_features = True
-            input_dim = pred_dim * 3 + 6  # Both basic and statistical features
-            print(f"Judge model configuration:")
-            print(f"  Mode: FULL (basic + statistical features)")
-            print(f"  Input dimension: {input_dim}")
+        use_statistical_features = not args.no_stat
+        use_basic_features = args.use_pred and not args.stat_only
+        
+        print(f"Judge model configuration:")
+        print(f"  Use predictions: {args.use_pred}")
+        print(f"  Use hidden representation: True (default)")
+        print(f"  Use statistical features: {use_statistical_features}")
+        print(f"  Use basic features: {use_basic_features}")
+        print(f"  Hidden dimension: {hidden_dim}")
         
         judge_model = build_judge_model(
             pred_dim=pred_dim,
@@ -601,7 +655,9 @@ def main():
             dropout=args.judge_dropout,
             use_attention=args.judge_use_attention,
             use_statistical_features=use_statistical_features,
-            use_basic_features=use_basic_features
+            use_basic_features=use_basic_features,
+            hidden_dim=hidden_dim,
+            use_pred=args.use_pred
         ).to(device)
         
         # Count and display judge model parameters
@@ -615,7 +671,7 @@ def main():
     # Train or test based on split ratios
     if test_only:
         # Only test mode
-        if 'test' not in dataset_splits or len(dataset_splits['test'][0]) == 0:
+        if 'test' not in dataset_splits or len(dataset_splits['test'][1]) == 0:
             print("No test data available!")
             return
         
@@ -626,8 +682,8 @@ def main():
         results = {
             'test_results': test_results,
             'test_config': {
-                'num_samples': len(dataset_splits['test'][0]),
-                'fraud_rate': float(np.mean(dataset_splits['test'][2])),
+                'num_samples': len(dataset_splits['test'][1]),
+                'fraud_rate': float(np.mean(dataset_splits['test'][3])),
                 'target_features': resolved_target_names
             },
             'timestamp': datetime.now().isoformat()
@@ -642,11 +698,11 @@ def main():
         return
     
     # Training mode
-    if 'train' not in dataset_splits or len(dataset_splits['train'][0]) == 0:
+    if 'train' not in dataset_splits or len(dataset_splits['train'][1]) == 0:
         print("No training data available!")
         return
     
-    if 'val' not in dataset_splits or len(dataset_splits['val'][0]) == 0:
+    if 'val' not in dataset_splits or len(dataset_splits['val'][1]) == 0:
         print("Warning: No validation data available! Using training data for validation.")
         dataset_splits['val'] = dataset_splits['train']
     
@@ -664,7 +720,7 @@ def main():
     
     # Evaluate on test set if available
     test_results = None
-    if 'test' in dataset_splits and len(dataset_splits['test'][0]) > 0:
+    if 'test' in dataset_splits and len(dataset_splits['test'][1]) > 0:
         test_results = evaluate_judge_model(judge_model, dataset_splits['test'], device)
     
     # Get model parameters for saving
