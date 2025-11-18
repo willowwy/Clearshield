@@ -1,8 +1,206 @@
 import json
 import argparse
+import inspect
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+
+
+class GatedResidualNetwork(nn.Module):
+    """Gated Residual Network (GRN) module for enhanced feature transformation.
+    
+    GRN structure:
+    - Linear transformation: d_model -> d_hidden
+    - Activation (ELU/GELU)
+    - Linear transformation: d_hidden -> d_model
+    - Gating mechanism with sigmoid
+    - Residual connection
+    - LayerNorm and Dropout for stability
+    """
+    def __init__(
+        self,
+        d_model: int,
+        d_hidden: int,
+        dropout: float = 0.1,
+        activation: str = 'gelu',
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.d_hidden = d_hidden
+        
+        # First linear layer: d_model -> d_hidden
+        self.linear1 = nn.Linear(d_model, d_hidden)
+        
+        # Activation function
+        if activation == 'gelu':
+            self.activation = nn.GELU()
+        elif activation == 'elu':
+            self.activation = nn.ELU()
+        elif activation == 'relu':
+            self.activation = nn.ReLU()
+        else:
+            self.activation = nn.GELU()  # default
+        
+        # Second linear layer: d_hidden -> d_model
+        self.linear2 = nn.Linear(d_hidden, d_model)
+        
+        # Gating mechanism: sigmoid gate to control information flow
+        self.gate = nn.Linear(d_model, d_model)
+        
+        # Layer normalization
+        self.norm = nn.LayerNorm(d_model)
+        
+        # Dropout
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape [B, T, d_model] or [B, T*F, d_model]
+        Returns:
+            Output tensor of same shape as input
+        """
+        residual = x  # Store input for residual connection
+        
+        # First transformation
+        x = self.linear1(x)  # [B, T, d_hidden]
+        x = self.activation(x)
+        x = self.dropout(x)
+        
+        # Second transformation
+        x = self.linear2(x)  # [B, T, d_model]
+        
+        # Gating mechanism: sigmoid gate controls information flow
+        gate = torch.sigmoid(self.gate(residual))  # [B, T, d_model]
+        x = gate * x + (1 - gate) * residual  # Gated residual connection
+        
+        # Layer normalization
+        x = self.norm(x)
+        
+        return x
+
+
+class GRNTransformerEncoderLayer(nn.Module):
+    """Custom Transformer Encoder Layer with GRN replacing standard FFN.
+    
+    This layer maintains the same interface as nn.TransformerEncoderLayer
+    but uses GatedResidualNetwork instead of the standard feed-forward network.
+    """
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        dim_feedforward: int,
+        dropout: float = 0.1,
+        activation: str = 'relu',
+        batch_first: bool = True,
+        norm_first: bool = False,
+        use_grn: bool = True,
+    ):
+        super().__init__()
+        self.norm_first = norm_first
+        self.use_grn = use_grn
+        
+        # Multi-head attention (same as standard Transformer)
+        self.self_attn = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=batch_first
+        )
+        
+        # Check if MultiheadAttention supports is_causal parameter
+        self._supports_is_causal = 'is_causal' in inspect.signature(self.self_attn.forward).parameters
+        
+        # Normalization layers
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        
+        # Dropout layers
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        
+        # Feed-forward network: use GRN if enabled, otherwise standard FFN
+        if use_grn:
+            self.grn = GatedResidualNetwork(
+                d_model=d_model,
+                d_hidden=dim_feedforward,
+                dropout=dropout,
+                activation=activation,
+            )
+            self.ffn = None
+        else:
+            # Standard FFN as fallback
+            self.ffn = nn.Sequential(
+                nn.Linear(d_model, dim_feedforward),
+                nn.ReLU() if activation == 'relu' else nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(dim_feedforward, d_model),
+                nn.Dropout(dropout),
+            )
+            self.grn = None
+    
+    def forward(
+        self,
+        src: torch.Tensor,
+        src_mask: torch.Tensor = None,
+        src_key_padding_mask: torch.Tensor = None,
+        is_causal: bool = False,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Args:
+            src: Input tensor [B, T, d_model]
+            src_mask: Attention mask (optional)
+            src_key_padding_mask: Padding mask [B, T], True for padding positions
+            is_causal: Whether to apply causal masking (for compatibility with newer PyTorch versions)
+            **kwargs: Additional arguments for compatibility with different PyTorch versions
+        Returns:
+            Output tensor [B, T, d_model]
+        """
+        x = src
+        
+        # Self-attention block
+        if self.norm_first:
+            # Pre-LN: normalize before attention
+            x_norm = self.norm1(x)
+            # Prepare attention arguments
+            attn_kwargs = {
+                'attn_mask': src_mask,
+                'key_padding_mask': src_key_padding_mask,
+            }
+            # Add is_causal if supported by this PyTorch version
+            if self._supports_is_causal and is_causal:
+                attn_kwargs['is_causal'] = is_causal
+            x_attn = self.self_attn(x_norm, x_norm, x_norm, **attn_kwargs)[0]
+            x = x + self.dropout1(x_attn)
+        else:
+            # Post-LN: normalize after attention
+            attn_kwargs = {
+                'attn_mask': src_mask,
+                'key_padding_mask': src_key_padding_mask,
+            }
+            # Add is_causal if supported by this PyTorch version
+            if self._supports_is_causal and is_causal:
+                attn_kwargs['is_causal'] = is_causal
+            x_attn = self.self_attn(x, x, x, **attn_kwargs)[0]
+            x = self.norm1(x + self.dropout1(x_attn))
+        
+        # Feed-forward block (GRN or standard FFN)
+        if self.norm_first:
+            # Pre-LN: normalize before FFN
+            x_norm = self.norm2(x)
+            if self.use_grn:
+                x_ffn = self.grn(x_norm)
+            else:
+                x_ffn = self.ffn(x_norm)
+            x = x + self.dropout2(x_ffn)
+        else:
+            # Post-LN: normalize after FFN
+            if self.use_grn:
+                x_ffn = self.grn(x)
+            else:
+                x_ffn = self.ffn(x)
+            x = self.norm2(x + self.dropout2(x_ffn))
+        
+        return x
 
 
 class TimeCatLSTM(nn.Module):
@@ -564,12 +762,16 @@ class FraudFTEnc(nn.Module):
         # Feature type embedding: each feature gets its own embedding to identify which feature it is
         self.feature_emb = nn.Embedding(num_features, transformer_dim)
         
-        # Multi-layer Transformer Encoder (same as FraudEnc)
+        # Multi-layer Transformer Encoder with GRN support
         dim_feedforward = getattr(args, 'dim_feedforward', 0)
         if dim_feedforward == 0:
             dim_feedforward = transformer_dim * 2
         
-        encoder_layer = nn.TransformerEncoderLayer(
+        # Use GRN by default (can be disabled via args.use_grn)
+        use_grn = getattr(args, 'use_grn', True)
+        
+        # Create custom encoder layer with GRN
+        encoder_layer = GRNTransformerEncoderLayer(
             d_model=transformer_dim,
             nhead=getattr(args, 'nhead', 3),
             dim_feedforward=dim_feedforward,
@@ -577,6 +779,7 @@ class FraudFTEnc(nn.Module):
             activation=getattr(args, 'activation', 'relu'),
             batch_first=True,
             norm_first=getattr(args, 'norm_first', False),
+            use_grn=use_grn,
         )
         num_encoder_layers = getattr(args, 'num_encoder_layers', 1)
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
@@ -758,6 +961,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--activation", type=str, default="relu", help="Activation function (relu/gelu)")
     p.add_argument("--norm_first", action="store_true", default = True, help="Apply normalization before attention/ffn (Pre-LN)")
     p.add_argument("--max_seq_len", type=int, default=512, help="Maximum sequence length for positional embeddings")
+    
+    # GRN (Gated Residual Network) related parameters (for FraudFTEnc)
+    p.add_argument("--use_grn", action="store_true", default=True, help="Use Gated Residual Network in Transformer Encoder (default: True)")
+    p.add_argument("--no_use_grn", dest="use_grn", action="store_false", help="Disable GRN and use standard FFN")
 
     # Training related (optional)
     p.add_argument("--lr", type=float, default=1e-3, help="Learning rate")

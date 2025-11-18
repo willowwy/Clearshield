@@ -319,7 +319,7 @@ def train_judge_model(judge_model, train_data, val_data, device, args):
                 'model_state_dict': judge_model.state_dict(),
                 'val_accuracy': val_acc,
                 'args': args
-            }, f'checkpoints-enc/best_judge_model.pth')
+            }, f'checkpoints-ftenc/best_judge_model.pth')
         
         if epoch % 10 == 0:
             current_lr = trainer.get_lr()
