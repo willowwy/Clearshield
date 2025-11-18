@@ -102,8 +102,8 @@ def _select_csv_files(matched_dir: str, mode: str, train_val_test: tuple[float, 
     n_test = n - n_train - n_val
 
     train_idx = indices[:n_train]
-    val_idx = indices[n_train:n_train + n_test]
-    test_idx = indices[n_train + n_test:]
+    val_idx = indices[n_train:n_train + n_val]
+    test_idx = indices[n_train + n_val:]
 
     if mode == "train":
         chosen = train_idx
@@ -290,9 +290,9 @@ def build_sequences_from_dataframe(df: pd.DataFrame):
 
 
 class FraudDataset(Dataset):
-    def __init__(self, sequences, max_len: int = 50, use_sliding_window: bool = False, window_overlap: float = 0.5):
+    def __init__(self, sequences_with_csv_idx, max_len: int = 50, use_sliding_window: bool = False, window_overlap: float = 0.5):
         """
-        sequences: list of (X, y) tuples where each tuple represents sequences from a single CSV file
+        sequences_with_csv_idx: list of (csv_idx, X, y) tuples where csv_idx indicates which CSV file the sequence comes from
         max_len: Maximum sequence length
         use_sliding_window: Whether to use sliding window
         window_overlap: Sliding window overlap ratio (0.0-0.9)
@@ -303,7 +303,7 @@ class FraudDataset(Dataset):
         self.use_sliding_window = use_sliding_window
         self.window_overlap = window_overlap
         
-        for csv_idx, (X, y) in enumerate(sequences):
+        for csv_idx, X, y in sequences_with_csv_idx:
             seq_len = len(X)
             if seq_len <= 0:
                 continue
@@ -357,6 +357,13 @@ class FraudDataset(Dataset):
     def get_csv_file_indices(self):
         """Return CSV file index for each sequence"""
         return self.csv_file_indices
+    
+    def get_csv_file_distribution(self):
+        """Return distribution of sequences across CSV files"""
+        distribution = {}
+        for csv_idx in self.csv_file_indices:
+            distribution[csv_idx] = distribution.get(csv_idx, 0) + 1
+        return distribution
 
 
 class CSVConsistentBatchSampler:
@@ -399,6 +406,11 @@ class CSVConsistentBatchSampler:
                 yield batch_indices
     
     def __len__(self):
+        """
+        Calculate total number of batches.
+        Note: This is an upper bound if drop_all_zero_batches=True,
+        as some batches may be filtered out during iteration.
+        """
         total_batches = 0
         for indices in self.csv_groups.values():
             total_batches += (len(indices) + self.batch_size - 1) // self.batch_size
@@ -406,7 +418,7 @@ class CSVConsistentBatchSampler:
 
 
 # Public API to build DataLoader from matched CSVs
-def create_dataloader(matched_dir: str = "no_fraud", max_len: int = 50, batch_size: int = 32, shuffle: bool = True, mode: str = "train", split: tuple[float, float, float] = (0.8, 0.1, 0.1), seed: int = 42, drop_all_zero_batches: bool = True, use_sliding_window: bool = False, window_overlap: float = 0.5):
+def create_dataloader(matched_dir: str = "clustered_out/no_fraud", max_len: int = 50, batch_size: int = 32, shuffle: bool = True, mode: str = "train", split: tuple[float, float, float] = (0.8, 0.1, 0.1), seed: int = 42, drop_all_zero_batches: bool = True, use_sliding_window: bool = False, window_overlap: float = 0.5):
     """
     Create data loader with sliding window support to enhance data utilization efficiency
     
@@ -424,17 +436,19 @@ def create_dataloader(matched_dir: str = "no_fraud", max_len: int = 50, batch_si
     """
     dataframes = load_matched_dataframes(matched_dir, mode=mode, split=split, seed=seed)
     
-    all_sequences = []
+    all_sequences_with_csv_idx = []
     feature_names = None
     
-    # Build sequences for each CSV file
-    for df in dataframes:
+    # Build sequences for each CSV file, assign unique csv_idx to each CSV file
+    for csv_idx, df in enumerate(dataframes):
         sequences, feature_names = build_sequences_from_dataframe(df)
-        all_sequences.extend(sequences)
+        # All sequences from the same CSV file share the same csv_idx
+        for X, y in sequences:
+            all_sequences_with_csv_idx.append((csv_idx, X, y))
     
     # Create dataset with sliding window support
     dataset = FraudDataset(
-        all_sequences, 
+        all_sequences_with_csv_idx, 
         max_len=max_len,
         use_sliding_window=use_sliding_window and mode == "train",  # Only use sliding window during training
         window_overlap=window_overlap
@@ -449,59 +463,81 @@ def create_dataloader(matched_dir: str = "no_fraud", max_len: int = 50, batch_si
 
 
 if __name__ == "__main__":
-    # Test sliding window functionality
+    # Test CSV file consistency in batches
     print("=" * 80)
-    print("Test Sliding Window Functionality")
+    print("Test CSV File Consistency in Batches")
     print("=" * 80)
     
     try:
-        # Test different sliding window configurations
-        configs = [
-            {"use_sliding_window": False, "window_overlap": 0.0, "name": "Original Strategy"}#,
-            # {"use_sliding_window": True, "window_overlap": 0.3, "name": "Sliding Window 30% Overlap"},
-            # {"use_sliding_window": True, "window_overlap": 0.5, "name": "Sliding Window 50% Overlap"},
-            # {"use_sliding_window": True, "window_overlap": 0.7, "name": "Sliding Window 70% Overlap"},
-        ]
+        loader, feature_names = create_dataloader(
+            matched_dir="clustered_out/no_fraud",
+            max_len=50,
+            batch_size=32,
+            shuffle=True,
+            mode="train",
+            split=(0.8, 0.1, 0.1),
+            seed=42,
+            use_sliding_window=False,
+            window_overlap=0.0,
+            drop_all_zero_batches=False  # Disable to see all batches
+        )
         
-        for config in configs:
-            print(f"\n--- {config['name']} ---")
-            loader, feature_names = create_dataloader(
-                matched_dir="no_fraud",
-                max_len=50,
-                batch_size=32,
-                shuffle=True,
-                mode="train",
-                split=(0.8, 0.1, 0.1),
-                seed=42,
-                use_sliding_window=config["use_sliding_window"],
-                window_overlap=config["window_overlap"]
-            )
+        print(f"Features: {len(feature_names)} features")
+        print(f"Total batches (from __len__): {len(loader)}")
+        
+        # Get dataset to access csv_file_indices
+        dataset = loader.dataset
+        csv_file_indices = dataset.get_csv_file_indices()
+        
+        print(f"Total sequences in dataset: {len(dataset)}")
+        print(f"Unique CSV file indices: {len(set(csv_file_indices))}")
+        
+        # Check batch consistency
+        batch_csv_groups = {}
+        actual_batch_count = 0
+        
+        for batch_idx, (X, y, mask) in enumerate(loader):
+            actual_batch_count += 1
+            batch_size = X.shape[0]
             
-            print(f"Features: {len(feature_names)} features")
-            print(f"Total batches: {len(loader)}")
+            # Get the dataset indices for this batch
+            # Note: We need to track which indices are in each batch
+            # Since we're using a batch_sampler, we can't directly get the indices
+            # But we can check if all sequences in a batch have the same csv_idx
             
-            # Statistics for label distribution
-            total_sequences = 0
-            total_y1_sequences = 0
+            # For now, let's just print the first few batches
+            if batch_idx < 10:
+                print(f"\nBatch {batch_idx}: size={batch_size}")
             
-            for batch_idx, (X, y, mask) in enumerate(loader):
-                if batch_idx >= 5:  # Only check first 5 batches
-                    break
-                    
-                batch_size = X.shape[0]
-                total_sequences += batch_size
-                
-                # Use sequence-level label aggregation
-                valid_y = y * mask
-                seq_labels = (valid_y == 1).any(dim=1).float()
-                y1_count = (seq_labels == 1).sum().item()
-                total_y1_sequences += y1_count
-                
-                print(f"  Batch {batch_idx}: sequences={batch_size}, y==1 sequences={y1_count}")
-            
-            if total_sequences > 0:
-                fraud_rate = total_y1_sequences / total_sequences
-                print(f"  First 5 batches stats: total sequences={total_sequences}, y==1 sequences={total_y1_sequences}, fraud rate={fraud_rate:.4f}")
+        print(f"\nActual batches yielded: {actual_batch_count}")
+        print(f"Expected batches (from __len__): {len(loader)}")
+        
+        # Verify CSV grouping in sampler
+        batch_sampler = loader.batch_sampler
+        print(f"\nCSV groups in sampler: {len(batch_sampler.csv_groups)}")
+        print(f"Total sequences grouped: {sum(len(indices) for indices in batch_sampler.csv_groups.values())}")
+        
+        # Check CSV file distribution
+        csv_file_distribution = {}
+        for csv_idx in csv_file_indices:
+            csv_file_distribution[csv_idx] = csv_file_distribution.get(csv_idx, 0) + 1
+        
+        print(f"\nCSV file distribution (how many sequences per CSV file):")
+        for csv_idx, count in sorted(csv_file_distribution.items())[:10]:
+            print(f"  CSV file {csv_idx}: {count} sequences")
+        
+        # Verify that sampler groups match the distribution
+        print(f"\nVerifying sampler groups:")
+        for csv_idx, indices in list(batch_sampler.csv_groups.items())[:5]:
+            print(f"  Group csv_idx={csv_idx}: {len(indices)} sequences")
+            # Check that all indices in this group have the same csv_idx
+            csv_indices_in_group = [csv_file_indices[i] for i in indices]
+            unique_csv_indices = set(csv_indices_in_group)
+            if len(unique_csv_indices) == 1:
+                print(f"    ✓ All sequences have csv_idx={list(unique_csv_indices)[0]}")
+            else:
+                print(f"    ✗ ERROR: Mixed csv_idx in group: {unique_csv_indices}")
+                print(f"      This should not happen! Group contains sequences from different CSV files.")
             
     except Exception as e:
         print("Failed to create dataloader:", e)
