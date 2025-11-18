@@ -32,8 +32,9 @@ def reorganize_by_member(input_dir, output_dir, chunksize):
 
                 for member_id, member_data in grouped:
                     member_file = os.path.join(output_dir, f"member_{member_id}.csv")
+                    file_exists = os.path.exists(member_file)
 
-                    if member_file in member_files_created:
+                    if member_file in member_files_created or file_exists:
                         member_data.to_csv(member_file, mode='a', header=False, index=False)
                     else:
                         member_data.to_csv(member_file, mode='w', header=True, index=False)

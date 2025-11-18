@@ -12,9 +12,11 @@ import importlib.util
 from pathlib import Path
 from datetime import datetime
 
-# Disable MPS (Apple Silicon GPU) to avoid segmentation faults with transformers
-# This forces PyTorch to use CPU for better stability
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+# Fix multiprocessing issues on macOS
+os.environ['OBJC_DISABLE_INITIALIZE_FORK_SAFETY'] = 'YES'
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
 
 
 def load_module(module_name, file_path):
@@ -89,24 +91,21 @@ def stage2_feature_engineering(fe, verbose=True):
     start_time = datetime.now()
     print_stage_header(2, "Feature Engineering")
 
-    # Configure only the parameters that are actually used
+    # Configure exactly like ipynb
     fe.PROCESSED_DIR = '../../data/cleaned'
     fe.MODEL_NAME = 'prajjwal1/bert-tiny'
     fe.TEXT_COLUMN = 'Transaction Description'
     fe.BATCH_SIZE = 64
     fe.MAX_LENGTH = 64
     fe.PCA_DIM = 20
+    fe.MIN_K = 10
+    fe.MAX_K = 60
+    fe.K_STEP = 10
+    fe.SAMPLE_SIZE = 10000
     fe.CLUSTER_BATCH_SIZE = 4096
     fe.RANDOM_STATE = 42
 
-    if verbose:
-        print(f"Input:  {fe.PROCESSED_DIR}")
-        print(f"Output: ../../data/clustered_out/")
-        print(f"Model:  {fe.MODEL_NAME}")
-        print(f"PCA Dimensions: {fe.PCA_DIM}")
-        print("Device: CPU (MPS disabled for stability)\n")
-
-    # Run
+    # Run exactly like ipynb
     outputs = fe.main()
 
     elapsed = (datetime.now() - start_time).total_seconds()
@@ -166,7 +165,7 @@ def stage4_encoding(enc, verbose=True):
     return elapsed
 
 
-def main():
+def run_pipeline():
     """Main pipeline execution"""
     parser = argparse.ArgumentParser(
         description='ClearShield Automated Data Processing Pipeline',
@@ -211,17 +210,6 @@ Examples:
 
     # Load modules
     print("Loading modules...")
-
-    # Monkey patch torch to disable MPS before loading feature engineering module
-    try:
-        import torch
-        if hasattr(torch.backends, 'mps'):
-            original_is_available = torch.backends.mps.is_available
-            torch.backends.mps.is_available = lambda: False
-            print("Note: MPS (Apple GPU) disabled, using CPU for stability")
-    except ImportError:
-        pass
-
     dc = load_module("data_cleaning", "./01_data_cleaning/01_data_cleaning.py")
     fe = load_module("feature_engineering", "./02_feature_engineering/02_feature_engineering.py")
     fr = load_module("fraud_relabeling", "./03_fraud_relabeling/03_fraud_relabeling.py")
@@ -284,6 +272,17 @@ Examples:
         print("\nPlease check the error message and try again.")
         print("=" * 70 + "\n")
         sys.exit(1)
+
+
+def main():
+    """Entry point with multiprocessing protection"""
+    # Disable scikit-learn parallel processing to avoid fork issues on macOS
+    try:
+        from sklearn.utils import parallel_backend
+        with parallel_backend('threading', n_jobs=1):
+            run_pipeline()
+    except ImportError:
+        run_pipeline()
 
 
 if __name__ == "__main__":
