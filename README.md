@@ -11,18 +11,19 @@ This fraud detection system combines traditional machine learning with deep lear
 ```
 ClearShield/
 ├── data/
-│   ├── raw/                     # Original datasets
-│   ├── cleaned/                 # Cleaned datasets (Step 1)
-│   ├── clustered_out/           # Clustered datasets (Step 2)
-│   ├── by_member/               # Member-grouped datasets (Step 3 intermediate)
-│   ├── processed/               # Fraud-matched datasets (Step 3)
-│   │   ├── matched/             # Members with matched fraud
-│   │   ├── unmatched/           # Members with unmatched fraud
-│   │   └── no_fraud/            # Members without fraud
-│   ├── final/                   # Final encoded datasets (Step 4)
-│   │   ├── matched/             # Ready for model training
-│   │   ├── unmatched/
-│   │   └── no_fraud/
+│   ├── train/                   # Training data pipeline (default)
+│   │   ├── raw/                 # Original datasets
+│   │   ├── cleaned/             # Cleaned datasets (Step 1)
+│   │   ├── clustered_out/       # Clustered datasets (Step 2)
+│   │   ├── by_member/           # Member-grouped datasets (Step 3 intermediate)
+│   │   ├── processed/           # Fraud-matched datasets (Step 3)
+│   │   │   ├── matched/         # Members with matched fraud
+│   │   │   ├── unmatched/       # Members with unmatched fraud
+│   │   │   └── no_fraud/        # Members without fraud
+│   │   └── final/               # Final encoded datasets (Step 4)
+│   │       ├── matched/         # Ready for model training
+│   │       ├── unmatched/
+│   │       └── no_fraud/
 │   └── external/                # External data sources (optional)
 │
 ├── docs/                        # Documentation files
@@ -68,34 +69,38 @@ The preprocessing pipeline consists of 4 sequential stages:
 - Fill missing values
 - Rename files based on date range
 
-**Data Flow**: `raw/` → `cleaned/`
+**Data Flow**: `train/raw/` → `train/cleaned/`
 
 ### Step 2: Feature Engineering (`02_feature_engineering`)
-- Encode transaction descriptions using BERT-tiny
-- Apply PCA dimensionality reduction
-- Perform automatic clustering (MiniBatchKMeans)
+- Encode transaction descriptions using BERT-tiny (`prajjwal1/bert-tiny`)
+- Apply PCA dimensionality reduction (default: 20 dimensions)
+- Perform automatic clustering (MiniBatchKMeans, k=60)
 - Add cluster_id column
+- **Configurable paths**: Supports custom input/output directories via parameters
 
-**Data Flow**: `cleaned/` → `clustered_out/`
+**Data Flow**: `train/cleaned/` → `train/clustered_out/`
 
 ### Step 3: Fraud Matching (`03_fraud_relabeling`)
 - **Stage 1**: Reorganize transactions by Member ID
 - **Stage 2**: Match fraud adjustments to original transactions
-- Filter members with ≥10 transactions
+  - Extract dates from fraud descriptions
+  - Match by amount and time window (30 days)
+  - Prioritize "Mobile Deposit" transactions
+- Filter members with ≥10 transactions (configurable)
 - Categorize into matched/unmatched/no_fraud
 
-**Data Flow**: `clustered_out/` → `by_member/` → `processed/[matched|unmatched|no_fraud]/`
+**Data Flow**: `train/clustered_out/` → `train/by_member/` → `train/processed/[matched|unmatched|no_fraud]/`
 
 ### Step 4: Feature Encoding (`04_encoding`)
 - Remove ID columns (Account ID, Member ID)
-- Encode categorical features (Account Type, Action Type, etc.)
-- Parse time features to decimal hours
-- Convert date features
-- Remove text columns
+- Encode categorical features (Account Type, Action Type, Source Type, Product ID)
+- Parse time features to `time` objects (HH:MM:SS format)
+- Convert date features to datetime
+- Remove text columns (Transaction Description, Fraud Adjustment Indicator)
 
-**Data Flow**: `processed/` → `final/[matched|unmatched|no_fraud]/`
+**Data Flow**: `train/processed/` → `train/final/[matched|unmatched|no_fraud]/`
 
-**Final Output**: `data/final/` contains model-ready datasets
+**Final Output**: `data/train/final/` contains model-ready datasets
 
 ## 🚀 Quick Start
 
@@ -143,10 +148,36 @@ python run_pipeline.py --min-history 15          # Set minimum history to 15
 - Open `src/data_preprocess/pipeline.ipynb`
 - Execute cells sequentially to run the complete 4-stage pipeline
 
-**Final datasets** will be in `data/final/[matched|unmatched|no_fraud]/`
+**Final datasets** will be in `data/train/final/[matched|unmatched|no_fraud]/`
 
 4. **Train models**
 
 - Navigate to `src/models/`
-- Use datasets from `data/final/[matched|unmatched|no_fraud]/`
+- Use datasets from `data/train/final/[matched|unmatched|no_fraud]/`
 - Follow model-specific training instructions
+
+## 🔧 Advanced Configuration
+
+### Custom Data Paths
+You can override default paths programmatically:
+
+```python
+from src.data_preprocess.feature_engineering import run_stage2
+
+run_stage2(
+    processed_dir='/custom/path/to/cleaned',
+    output_dir='/custom/path/to/output',
+    model_name='prajjwal1/bert-tiny',
+    pca_dim=20,
+    max_k=60,
+    verbose=True
+)
+```
+
+### Pipeline Parameters
+- `--min-history N`: Minimum transaction count per member (default: 10)
+- `--skip-cleaning`: Skip data cleaning stage
+- `--skip-feature-engineering`: Skip feature engineering stage
+- `--skip-fraud-matching`: Skip fraud matching stage
+- `--skip-encoding`: Skip feature encoding stage
+- `--quiet`: Suppress verbose output
