@@ -48,16 +48,16 @@ def print_stage_footer(stage_num, stage_name, elapsed):
 def setup_directories():
     """Create necessary directories"""
     directories = [
-        '../../data/raw',
-        '../../data/cleaned',
-        '../../data/clustered_out',
-        '../../data/by_member',
-        '../../data/processed/matched',
-        '../../data/processed/unmatched',
-        '../../data/processed/no_fraud',
-        '../../data/final/matched',
-        '../../data/final/unmatched',
-        '../../data/final/no_fraud',
+        '../../data/train/raw',
+        '../../data/train/cleaned',
+        '../../data/train/clustered_out',
+        '../../data/train/by_member',
+        '../../data/train/processed/matched',
+        '../../data/train/processed/unmatched',
+        '../../data/train/processed/no_fraud',
+        '../../data/train/final/matched',
+        '../../data/train/final/unmatched',
+        '../../data/train/final/no_fraud',
     ]
 
     for directory in directories:
@@ -71,8 +71,8 @@ def stage1_data_cleaning(dc, verbose=True):
 
     # Configure
     dc.ENABLE_RENAMING = True
-    dc.RAW_DIR = '../../data/raw'
-    dc.CLEANED_DIR = '../../data/cleaned'
+    dc.RAW_DIR = '../../data/train/raw'
+    dc.CLEANED_DIR = '../../data/train/cleaned'
 
     if verbose:
         print(f"Input:  {dc.RAW_DIR}")
@@ -92,7 +92,7 @@ def stage2_feature_engineering(fe, verbose=True):
     print_stage_header(2, "Feature Engineering")
 
     # Configure exactly like ipynb
-    fe.PROCESSED_DIR = '../../data/cleaned'
+    fe.PROCESSED_DIR = '../../data/train/cleaned'
     fe.MODEL_NAME = 'prajjwal1/bert-tiny'
     fe.TEXT_COLUMN = 'Transaction Description'
     fe.BATCH_SIZE = 64
@@ -119,9 +119,9 @@ def stage3_fraud_matching(fr, min_history_length=10, verbose=True):
     print_stage_header(3, "Fraud Matching and Re-labeling")
 
     # Configure
-    fr.INPUT_DIR = '../../data/clustered_out'
-    fr.OUTPUT_MEMBER_DIR = '../../data/by_member'
-    fr.OUTPUT_PROCESSED_DIR = '../../data/processed'
+    fr.INPUT_DIR = '../../data/train/clustered_out'
+    fr.OUTPUT_MEMBER_DIR = '../../data/train/by_member'
+    fr.OUTPUT_PROCESSED_DIR = '../../data/train/processed'
     fr.CHUNKSIZE = 50000
 
     if verbose:
@@ -148,8 +148,8 @@ def stage4_encoding(enc, verbose=True):
     print_stage_header(4, "Feature Encoding")
 
     # Configure
-    enc.PROCESSED_DIR = '../../data/processed'
-    enc.OUTPUT_DIR = '../../data/final'
+    enc.PROCESSED_DIR = '../../data/train/processed'
+    enc.OUTPUT_DIR = '../../data/train/final'
     enc.CONFIG_PATH = '../../config/tokenize_dict.json'
 
     if verbose:
@@ -257,7 +257,7 @@ Examples:
             for stage, elapsed in timings.items():
                 print(f"  {stage}: {elapsed:.2f}s ({elapsed / 60:.2f}m)")
 
-        print("\nFinal Output: ../../data/final/")
+        print("\nFinal Output: ../../data/train/final/")
         print("  - matched/")
         print("  - unmatched/")
         print("  - no_fraud/")

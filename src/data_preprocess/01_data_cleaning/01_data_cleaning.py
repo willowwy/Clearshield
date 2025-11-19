@@ -14,8 +14,8 @@ warnings.filterwarnings('ignore')
 
 # Configuration
 ENABLE_RENAMING = True
-RAW_DIR = '../../data/raw'
-CLEANED_DIR = '../../data/cleaned'
+RAW_DIR = '../../data/train/raw'
+CLEANED_DIR = '../../data/train/cleaned'
 
 STANDARD_HEADERS = [
     'Account ID', 'Member ID', 'Account Type', 'Account Open Date',

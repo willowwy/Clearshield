@@ -10,19 +10,17 @@ CONFIG_PATH = '../../../config/tokenize_dict.json' #json cnofig
 CAT_FEATURES = ["Account Type", "Action Type", "Source Type", "Product ID"]
 
 
-def parse_post_time(time_str):
-    """Convert post time string to decimal hours (e.g., '105856' -> 10.98)"""
-    if pd.isna(time_str) or time_str == '':
-        return 0.0
+def parse_post_time(x):
+    """Convert post time string to time object (e.g., '105856' -> 10:58:56)"""
+    if pd.isna(x) or x == '':
+        return None
 
     try:
-        time_str = str(int(float(time_str))).zfill(6)  # Ensure 6 digits
-        hour = int(time_str[:2])
-        minute = int(time_str[2:4])
-        second = int(time_str[4:6])
-        return hour + minute / 60.0 + second / 3600.0
+        s = str(int(float(x))).zfill(6)
+        hh, mm, ss = int(s[0:2]), int(s[2:4]), int(s[4:6])
+        return pd.to_datetime(f"{hh}:{mm}:{ss}", format="%H:%M:%S").time()
     except:
-        return 0.0
+        return None
 
 
 def encode_features(processed_dir=None, output_dir=None, config_path=None):

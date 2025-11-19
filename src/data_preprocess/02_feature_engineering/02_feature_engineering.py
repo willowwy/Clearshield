@@ -14,7 +14,10 @@ import os
 from pathlib import Path
 
 # Configuration - can be modified from external scripts
-PROCESSED_DIR = '../../../data/processed'
+# Use absolute path based on project root for consistency
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROCESSED_DIR = str(PROJECT_ROOT / 'data' / 'train' / 'cleaned')
+OUTPUT_DIR = str(PROJECT_ROOT / 'data' / 'train' / 'clustered_out')
 MODEL_NAME = 'sentence-transformers/all-MiniLM-L6-v2'
 TEXT_COLUMN = 'Transaction Description'
 BATCH_SIZE = 64
@@ -28,7 +31,7 @@ CLUSTER_BATCH_SIZE = 4096
 RANDOM_STATE = 42
 
 
-def run_stage2(processed_dir=None, model_name=None, text_column=None,
+def run_stage2(processed_dir=None, output_dir=None, model_name=None, text_column=None,
                batch_size=None, max_length=None, pca_dim=None,
                min_k=None, max_k=None, k_step=None, sample_size=None,
                cluster_batch_size=None, random_state=None, verbose=True):
@@ -41,6 +44,7 @@ def run_stage2(processed_dir=None, model_name=None, text_column=None,
 
     Args:
         processed_dir: Root directory containing processed member files (default: PROCESSED_DIR)
+        output_dir: Output directory for clustered files (default: OUTPUT_DIR)
         model_name: Hugging Face model identifier (default: MODEL_NAME)
         text_column: Column name to encode (default: TEXT_COLUMN)
         batch_size: Batch size for encoding (default: BATCH_SIZE)
@@ -59,6 +63,7 @@ def run_stage2(processed_dir=None, model_name=None, text_column=None,
     """
     # Use global config if not specified
     processed_dir = processed_dir or PROCESSED_DIR
+    output_dir = output_dir or OUTPUT_DIR
     model_name = model_name or MODEL_NAME
     text_column = text_column or TEXT_COLUMN
     batch_size = batch_size or BATCH_SIZE
@@ -76,6 +81,7 @@ def run_stage2(processed_dir=None, model_name=None, text_column=None,
         print("STAGE 2: DESCRIPTION ENCODING AND CLUSTERING")
         print("=" * 60)
         print(f"Input: {processed_dir}")
+        print(f"Output: {output_dir}")
         print(f"Model: {model_name}")
         print(f"Text Column: {text_column}")
         print(f"PCA Dimensions: {pca_dim}")
@@ -96,6 +102,7 @@ def run_stage2(processed_dir=None, model_name=None, text_column=None,
     # Note: description_encoder uses cluster_count instead of min_k/max_k/k_step
     outputs = desc_encoder.run_pipeline(
         raw_root=processed_dir,
+        output_root=output_dir,
         model_name=model_name,
         text_column=text_column,
         batch_size=batch_size,
@@ -111,7 +118,7 @@ def run_stage2(processed_dir=None, model_name=None, text_column=None,
         print("STAGE 2 COMPLETE")
         print("=" * 60)
         print(f"Processed {len(outputs)} files")
-        print(f"Output location: {processed_dir.replace('/processed/', '/clustered_out/')}")
+        print(f"Output location: {output_dir}")
 
     return outputs
 
