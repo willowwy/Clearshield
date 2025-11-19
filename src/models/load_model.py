@@ -138,24 +138,46 @@ def load_judge_model(judge_model_path, device, pred_dim=None):
             inferred_hidden_dim = getattr(args, 'hidden_dim', None)
             
             # If hidden_dim is not in args, try to infer from input_dim
+            # Note: New architecture uses hidden_dim * 2 (with delta)
             if inferred_hidden_dim is None:
                 # Try to infer from input_dim
+                # New architecture: input_dim = hidden_dim * 2 + (pred_dim * 3 if use_pred) + (6 if use_statistical_features)
                 if inferred_use_pred and use_basic_features and use_statistical_features:
-                    # input_dim = hidden_dim + pred_dim * 3 + 6
+                    # input_dim = hidden_dim * 2 + pred_dim * 3 + 6
                     # We need pred_dim to infer hidden_dim, so use provided pred_dim
                     if pred_dim is not None:
-                        inferred_hidden_dim = input_dim - pred_dim * 3 - 6
+                        # Try new architecture first (with delta)
+                        remainder = (input_dim - pred_dim * 3 - 6) % 2
+                        if remainder == 0:
+                            inferred_hidden_dim = (input_dim - pred_dim * 3 - 6) // 2
+                            print(f"Inferred hidden_dim={inferred_hidden_dim} from new architecture (with delta): input_dim={input_dim} = {inferred_hidden_dim}*2 + {pred_dim}*3 + 6")
+                        else:
+                            # Fallback to old architecture (without delta)
+                            inferred_hidden_dim = input_dim - pred_dim * 3 - 6
+                            print(f"Inferred hidden_dim={inferred_hidden_dim} from old architecture (without delta): input_dim={input_dim} = {inferred_hidden_dim} + {pred_dim}*3 + 6")
                     else:
                         # Can't infer without pred_dim, use a default
                         print("Warning: Cannot infer hidden_dim without pred_dim, will try to infer from sequence model")
                         inferred_hidden_dim = None
                 elif use_statistical_features:
-                    # input_dim = hidden_dim + 6 (default case)
-                    inferred_hidden_dim = input_dim - 6
+                    # input_dim = hidden_dim * 2 + 6 (new architecture with delta)
+                    # or input_dim = hidden_dim + 6 (old architecture without delta)
+                    remainder = (input_dim - 6) % 2
+                    if remainder == 0:
+                        inferred_hidden_dim = (input_dim - 6) // 2
+                        print(f"Inferred hidden_dim={inferred_hidden_dim} from new architecture (with delta): input_dim={input_dim} = {inferred_hidden_dim}*2 + 6")
+                    else:
+                        inferred_hidden_dim = input_dim - 6
+                        print(f"Inferred hidden_dim={inferred_hidden_dim} from old architecture (without delta): input_dim={input_dim} = {inferred_hidden_dim} + 6")
                 else:
-                    # input_dim = hidden_dim (only hidden representation)
-                    inferred_hidden_dim = input_dim
-                print(f"Inferred hidden_dim={inferred_hidden_dim} from new model checkpoint (input_dim={input_dim})")
+                    # input_dim = hidden_dim * 2 (new architecture) or hidden_dim (old architecture)
+                    remainder = input_dim % 2
+                    if remainder == 0:
+                        inferred_hidden_dim = input_dim // 2
+                        print(f"Inferred hidden_dim={inferred_hidden_dim} from new architecture (with delta): input_dim={input_dim} = {inferred_hidden_dim}*2")
+                    else:
+                        inferred_hidden_dim = input_dim
+                        print(f"Inferred hidden_dim={inferred_hidden_dim} from old architecture (without delta): input_dim={input_dim}")
             
             # Infer pred_dim if not provided
             if pred_dim is None:
@@ -209,8 +231,94 @@ def load_judge_model(judge_model_path, device, pred_dim=None):
         use_pred=final_use_pred
     ).to(device)
     
-    # Load model state
-    judge_model.load_state_dict(checkpoint['model_state_dict'])
+    # Check if we need to adapt old model weights to new architecture (with delta)
+    old_state_dict = checkpoint['model_state_dict']
+    new_state_dict = judge_model.state_dict()
+    
+    # Check if input dimensions match
+    old_input_weight = old_state_dict.get('dnn.0.weight', None)
+    new_input_weight = new_state_dict.get('dnn.0.weight', None)
+    
+    if old_input_weight is not None and new_input_weight is not None:
+        old_dim = old_input_weight.shape[1]
+        new_dim = new_input_weight.shape[1]
+        
+        if old_dim != new_dim:
+            # Need to adapt weights from old architecture to new architecture
+            print(f"Detected dimension mismatch: old model input_dim={old_dim}, new model input_dim={new_dim}")
+            print("Adapting weights from old model (without delta) to new model (with delta)...")
+            
+            # Calculate dimensions for old model
+            # Old model: hidden_dim + (pred_dim * 3 if use_pred and use_basic_features) + (6 if use_statistical_features)
+            old_hidden_dim = final_hidden_dim if final_hidden_dim is not None else 0
+            old_pred_part = pred_dim * 3 if (final_use_pred and use_basic_features) else 0
+            old_stat_part = 6 if use_statistical_features else 0
+            old_total_expected = old_hidden_dim + old_pred_part + old_stat_part
+            
+            # New model: hidden_dim * 2 + (pred_dim * 3 if use_pred and use_basic_features) + (6 if use_statistical_features)
+            new_hidden_dim = final_hidden_dim * 2 if final_hidden_dim is not None else 0
+            new_pred_part = pred_dim * 3 if (final_use_pred and use_basic_features) else 0
+            new_stat_part = 6 if use_statistical_features else 0
+            new_total_expected = new_hidden_dim + new_pred_part + new_stat_part
+            
+            if old_dim == old_total_expected and new_dim == new_total_expected:
+                # This is the case: old model without delta, new model with delta
+                # Adapt weights: [old_hidden, old_pred, old_stat] -> [old_hidden, zeros, old_pred, old_stat]
+                adapted_state_dict = {}
+                
+                for key, old_weight in old_state_dict.items():
+                    if key == 'dnn.0.weight':
+                        # First layer weight: [out_dim, in_dim]
+                        # Move old_weight to device if needed
+                        old_weight = old_weight.to(device)
+                        out_dim = old_weight.shape[0]
+                        old_in_dim = old_weight.shape[1]
+                        
+                        # Create new weight tensor
+                        new_weight = torch.zeros(out_dim, new_dim, device=device, dtype=old_weight.dtype)
+                        
+                        # Map old weights to new positions
+                        new_offset = 0
+                        
+                        # 1. Copy old hidden part to new hidden[t] part
+                        if old_hidden_dim > 0:
+                            new_weight[:, new_offset:new_offset + old_hidden_dim] = old_weight[:, 0:old_hidden_dim]
+                            new_offset += old_hidden_dim
+                            # 2. Add zeros for delta part
+                            new_offset += old_hidden_dim  # Skip delta (zeros)
+                        
+                        # 3. Copy old pred part
+                        if old_pred_part > 0:
+                            old_pred_start = old_hidden_dim
+                            new_weight[:, new_offset:new_offset + old_pred_part] = old_weight[:, old_pred_start:old_pred_start + old_pred_part]
+                            new_offset += old_pred_part
+                        
+                        # 4. Copy old stat part
+                        if old_stat_part > 0:
+                            old_stat_start = old_hidden_dim + old_pred_part
+                            new_weight[:, new_offset:new_offset + old_stat_part] = old_weight[:, old_stat_start:old_stat_start + old_stat_part]
+                        
+                        adapted_state_dict[key] = new_weight
+                    else:
+                        # Other layers remain the same, but move to device
+                        adapted_state_dict[key] = old_weight.to(device) if isinstance(old_weight, torch.Tensor) else old_weight
+                
+                # Load adapted state dict
+                judge_model.load_state_dict(adapted_state_dict)
+                print("Successfully adapted old model weights to new architecture with delta")
+            else:
+                # Dimension mismatch but not due to delta addition - try direct load with strict=False
+                print(f"Warning: Dimension mismatch detected but not due to delta addition.")
+                print(f"Old expected: {old_total_expected}, Old actual: {old_dim}")
+                print(f"New expected: {new_total_expected}, New actual: {new_dim}")
+                print("Attempting to load with strict=False (may fail)...")
+                judge_model.load_state_dict(old_state_dict, strict=False)
+        else:
+            # Dimensions match, load normally
+            judge_model.load_state_dict(old_state_dict)
+    else:
+        # Load model state normally
+        judge_model.load_state_dict(old_state_dict)
     # Don't set eval mode here - let the caller decide (train or eval)
     
     # Count parameters

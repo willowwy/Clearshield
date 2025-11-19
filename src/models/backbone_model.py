@@ -6,16 +6,62 @@ import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 
+class AttentionPooling(nn.Module):
+    """Attention-based pooling to aggregate feature tokens into a single timestep token.
+    
+    Instead of mean pooling, uses learned attention weights:
+    weights = softmax(MLP(feature_tokens))
+    token = Σ(weights * feature_tokens)
+    """
+    def __init__(self, d_model: int, dropout: float = 0.1):
+        super().__init__()
+        self.d_model = d_model
+        # MLP to compute attention weights
+        self.attention_mlp = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, 1),
+        )
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+    
+    def forward(self, feature_tokens: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            feature_tokens: [B, T, F, d_model] - feature tokens for each timestep
+        Returns:
+            timestep_tokens: [B, T, d_model] - aggregated tokens for each timestep
+        """
+        B, T, F, d = feature_tokens.shape
+        
+        # Compute attention weights for each feature
+        # feature_tokens: [B, T, F, d] -> [B*T, F, d]
+        feature_tokens_flat = feature_tokens.reshape(B * T, F, d)
+        
+        # Compute attention scores: [B*T, F, 1]
+        attention_scores = self.attention_mlp(feature_tokens_flat)  # [B*T, F, 1]
+        attention_weights = torch.softmax(attention_scores, dim=1)  # [B*T, F, 1]
+        attention_weights = self.dropout(attention_weights)
+        
+        # Weighted sum: [B*T, F, d] * [B*T, F, 1] -> [B*T, d]
+        timestep_tokens_flat = (feature_tokens_flat * attention_weights).sum(dim=1)  # [B*T, d]
+        
+        # Reshape back: [B*T, d] -> [B, T, d]
+        timestep_tokens = timestep_tokens_flat.reshape(B, T, d)
+        
+        return timestep_tokens
+
+
 class GatedResidualNetwork(nn.Module):
     """Gated Residual Network (GRN) module for enhanced feature transformation.
     
     GRN structure:
+    - LayerNorm (at the beginning) -> x_norm
     - Linear transformation: d_model -> d_hidden
-    - Activation (ELU/GELU)
-    - Linear transformation: d_hidden -> d_model
-    - Gating mechanism with sigmoid
-    - Residual connection
-    - LayerNorm and Dropout for stability
+    - Activation (ReLU/ELU/GELU)
+    - Linear transformation: d_hidden -> d_model -> h
+    - Gating mechanism: gate = sigmoid(Wg(x_norm))  # Gate based on normalized input, NOT h
+    - Output: x_out = x_in + gate * h (residual + gated transformation)
     """
     def __init__(
         self,
@@ -60,24 +106,27 @@ class GatedResidualNetwork(nn.Module):
         Returns:
             Output tensor of same shape as input
         """
-        residual = x  # Store input for residual connection
+        x_in = x  # Store input for residual connection
         
-        # First transformation
-        x = self.linear1(x)  # [B, T, d_hidden]
+        # LayerNorm at the beginning
+        x_norm = self.norm(x)
+        
+        # First transformation: d_model -> d_hidden
+        x = self.linear1(x_norm)  # [B, T, d_hidden]
         x = self.activation(x)
         x = self.dropout(x)
         
-        # Second transformation
-        x = self.linear2(x)  # [B, T, d_model]
+        # Second transformation: d_hidden -> d_model to get h
+        h = self.linear2(x)  # [B, T, d_model]
         
-        # Gating mechanism: sigmoid gate controls information flow
-        gate = torch.sigmoid(self.gate(residual))  # [B, T, d_model]
-        x = gate * x + (1 - gate) * residual  # Gated residual connection
+        # Gating mechanism: sigmoid gate based on x_norm (normalized input), NOT h
+        # Gate: g = sigmoid(Wg(x_norm)), g in [0,1]
+        gate = torch.sigmoid(self.gate(x_norm))  # [B, T, d_model]
         
-        # Layer normalization
-        x = self.norm(x)
+        # Output: x_in + g * h (residual + gated transformation)
+        x_out = x_in + gate * h
         
-        return x
+        return x_out
 
 
 class GRNTransformerEncoderLayer(nn.Module):
@@ -754,35 +803,76 @@ class FraudFTEnc(nn.Module):
                     # Continuous feature: project from 1 dim
                     self.cont_feature_projs.append(nn.Linear(1, transformer_dim))
         
-        # Positional embeddings: separate time position and feature position
-        max_seq_len = getattr(args, 'max_seq_len', 512)
-        self.time_pos_emb = nn.Embedding(max_seq_len, transformer_dim)  # Time step position
-        self.feature_pos_emb = nn.Embedding(num_features, transformer_dim)  # Feature position
-        
-        # Feature type embedding: each feature gets its own embedding to identify which feature it is
-        self.feature_emb = nn.Embedding(num_features, transformer_dim)
-        
-        # Multi-layer Transformer Encoder with GRN support
-        dim_feedforward = getattr(args, 'dim_feedforward', 0)
-        if dim_feedforward == 0:
-            dim_feedforward = transformer_dim * 2
-        
-        # Use GRN by default (can be disabled via args.use_grn)
+        # GRN for feature-level transformation (placed at Tokenizer stage, after feature projection)
+        # This follows FT-Transformer pipeline: Feature Embedding → Feature Linear Projection → GRN
         use_grn = getattr(args, 'use_grn', True)
+        if use_grn:
+            dim_feedforward_grn = getattr(args, 'dim_feedforward', 0)
+            if dim_feedforward_grn == 0:
+                dim_feedforward_grn = transformer_dim * 2
+            self.grn = GatedResidualNetwork(
+                d_model=transformer_dim,
+                d_hidden=dim_feedforward_grn,
+                dropout=getattr(args, 'dropout', 0.1),
+                activation=getattr(args, 'activation', 'gelu'),
+            )
+        else:
+            self.grn = None
         
-        # Create custom encoder layer with GRN
-        encoder_layer = GRNTransformerEncoderLayer(
+        # Feature Transformer: self-attention within each timestep across features
+        # This does feature-wise attention for each timestep separately
+        dim_feedforward_feature = getattr(args, 'dim_feedforward', 0)
+        if dim_feedforward_feature == 0:
+            dim_feedforward_feature = transformer_dim * 2
+        
+        feature_nhead = getattr(args, 'feature_nhead', 4)  # Number of heads for feature attention
+        if transformer_dim // feature_nhead < 16:
+            feature_nhead = max(4, transformer_dim // 16)
+        
+        feature_encoder_layer = nn.TransformerEncoderLayer(
             d_model=transformer_dim,
-            nhead=getattr(args, 'nhead', 3),
-            dim_feedforward=dim_feedforward,
+            nhead=feature_nhead,
+            dim_feedforward=dim_feedforward_feature,
             dropout=getattr(args, 'dropout', 0.1),
             activation=getattr(args, 'activation', 'relu'),
             batch_first=True,
             norm_first=getattr(args, 'norm_first', False),
-            use_grn=use_grn,
+        )
+        num_feature_layers = getattr(args, 'num_feature_layers', 1)
+        self.feature_transformer = nn.TransformerEncoder(
+            feature_encoder_layer, num_layers=num_feature_layers
+        )
+        
+        # Attention pooling: aggregate F feature tokens into 1 timestep token
+        self.attention_pooling = AttentionPooling(
+            d_model=transformer_dim,
+            dropout=getattr(args, 'dropout', 0.1),
+        )
+        
+        # Time positional encoding
+        max_seq_len = getattr(args, 'max_seq_len', 512)
+        self.time_pos_emb = nn.Embedding(max_seq_len, transformer_dim)
+        
+        # Time Transformer: self-attention across timesteps
+        dim_feedforward_time = getattr(args, 'dim_feedforward', 0)
+        if dim_feedforward_time == 0:
+            dim_feedforward_time = transformer_dim * 2
+        
+        time_nhead = getattr(args, 'nhead', 4)  # Number of heads for time attention
+        if transformer_dim // time_nhead < 16:
+            time_nhead = max(4, transformer_dim // 16)
+        
+        time_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=transformer_dim,
+            nhead=time_nhead,
+            dim_feedforward=dim_feedforward_time,
+            dropout=getattr(args, 'dropout', 0.1),
+            activation=getattr(args, 'activation', 'relu'),
+            batch_first=True,
+            norm_first=getattr(args, 'norm_first', False),
         )
         num_encoder_layers = getattr(args, 'num_encoder_layers', 1)
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
+        self.time_transformer = nn.TransformerEncoder(time_encoder_layer, num_layers=num_encoder_layers)
         
         # Prediction head (same as FraudEnc)
         inferred_pred_dim = getattr(args, 'pred_dim', 0)
@@ -868,53 +958,63 @@ class FraudFTEnc(nn.Module):
                 feature_tokens.append(token)
                 cont_idx += 1
         
-        # Build token sequence: [B, T*F, transformer_dim]
-        # Stack all feature tokens along time dimension, then reshape
+        # Step 1: Build feature tokens [B, T, F, d_model]
         B, T, _ = feature_tokens[0].shape
         F = len(feature_tokens)
         
-        # Concatenate all feature tokens: [B, T, F, transformer_dim]
-        tokens_3d = torch.stack(feature_tokens, dim=2)  # [B, T, F, transformer_dim]
-        # Reshape to [B, T*F, transformer_dim]
-        tokens_flat = tokens_3d.reshape(B, T * F, self.transformer_dim)
+        # Stack all feature tokens: [B, T, F, transformer_dim]
+        feature_tokens_3d = torch.stack(feature_tokens, dim=2)  # [B, T, F, transformer_dim]
         
-        # Separate positional embeddings: time position and feature position
-        B, T_F, _ = tokens_flat.shape
+        # Apply GRN at Tokenizer stage (optional, after feature projection)
+        if self.grn is not None:
+            # Reshape for GRN: [B, T, F, d] -> [B*T*F, d] -> apply GRN -> [B*T*F, d] -> [B, T, F, d]
+            B_T_F, d = feature_tokens_3d.shape[0] * feature_tokens_3d.shape[1] * feature_tokens_3d.shape[2], feature_tokens_3d.shape[3]
+            feature_tokens_flat = feature_tokens_3d.reshape(B_T_F, d)
+            feature_tokens_flat = self.grn(feature_tokens_flat)
+            feature_tokens_3d = feature_tokens_flat.reshape(B, T, F, d)
         
-        # Compute time positions and feature positions for each token
-        # Token at position i corresponds to time_idx = i // F, feature_idx = i % F
-        time_positions = torch.arange(0, T, device=tokens_flat.device).unsqueeze(0).expand(B, -1)  # [B, T]
-        time_positions_expanded = time_positions.unsqueeze(-1).expand(-1, -1, F).reshape(B, T * F)  # [B, T*F]
-        time_pos_embeddings = self.time_pos_emb(time_positions_expanded)  # [B, T*F, transformer_dim]
+        # Step 2: Feature Transformer - self-attention within each timestep across features
+        # For each timestep t, do self-attention on F features
+        # Process each timestep separately: [B, T, F, d] -> reshape to [B*T, F, d]
+        feature_tokens_reshaped = feature_tokens_3d.reshape(B * T, F, self.transformer_dim)
         
-        feature_positions = torch.arange(0, F, device=tokens_flat.device).unsqueeze(0).expand(T, -1)  # [T, F]
-        feature_positions_expanded = feature_positions.reshape(T * F).unsqueeze(0).expand(B, -1)  # [B, T*F]
-        feature_pos_embeddings = self.feature_pos_emb(feature_positions_expanded)  # [B, T*F, transformer_dim]
+        # Create feature-level mask (all features are valid within a timestep)
+        feature_mask = torch.zeros(B * T, F, dtype=torch.bool, device=feature_tokens_reshaped.device)
         
-        # Feature type embeddings: identify which feature each token represents
-        feature_indices = torch.arange(0, F, device=tokens_flat.device).unsqueeze(0).expand(T, -1)  # [T, F]
-        feature_indices_expanded = feature_indices.reshape(T * F).unsqueeze(0).expand(B, -1)  # [B, T*F]
-        feature_type_embeddings = self.feature_emb(feature_indices_expanded)  # [B, T*F, transformer_dim]
+        # Apply feature transformer: self-attention across features for each timestep
+        feature_encoded = self.feature_transformer(
+            feature_tokens_reshaped, 
+            src_key_padding_mask=feature_mask
+        )  # [B*T, F, d_model]
         
-        # Combine all embeddings: token + time_pos + feature_pos + feature_type
-        tokens_with_pos = tokens_flat + time_pos_embeddings + feature_pos_embeddings + feature_type_embeddings
+        # Reshape back: [B*T, F, d] -> [B, T, F, d]
+        feature_encoded_3d = feature_encoded.reshape(B, T, F, self.transformer_dim)
         
-        # Expand mask: [B, T] -> [B, T*F]
-        # Each time step's mask is replicated F times
-        mask_expanded = mask.unsqueeze(-1).expand(-1, -1, F).reshape(B, T * F)  # [B, T*F]
-        attention_mask = (mask_expanded == 0).bool()  # [B, T*F], True where padding
+        # Step 3: Attention Pooling - aggregate F feature tokens into 1 timestep token
+        # [B, T, F, d] -> [B, T, d]
+        timestep_tokens = self.attention_pooling(feature_encoded_3d)  # [B, T, d_model]
         
-        # Pass through transformer encoder
-        out = self.transformer(tokens_with_pos, src_key_padding_mask=attention_mask)  # [B, T*F, transformer_dim]
+        # Step 4: Add time positional encoding
+        time_positions = torch.arange(0, T, device=timestep_tokens.device).unsqueeze(0).expand(B, -1)  # [B, T]
+        time_pos_embeddings = self.time_pos_emb(time_positions)  # [B, T, d_model]
+        timestep_tokens = timestep_tokens + time_pos_embeddings  # [B, T, d_model]
         
-        # Aggregate feature tokens back to time steps: [B, T*F, transformer_dim] -> [B, T, transformer_dim]
-        out_3d = out.reshape(B, T, F, self.transformer_dim)  # [B, T, F, transformer_dim]
-        out_agg = out_3d.mean(dim=2)  # [B, T, transformer_dim] - average pooling over features
+        # Step 5: Time Transformer - self-attention across timesteps
+        # Create time-level mask: [B, T], True where padding
+        time_mask = (mask == 0).bool()  # [B, T], True where padding
         
-        # Prediction head
-        preds = self.head(out_agg)  # [B, T, pred_dim]
-        # Hidden state is the aggregated transformer encoder output
-        hidden_state = out_agg  # [B, T, transformer_dim]
+        # Apply time transformer: self-attention across timesteps
+        encoded_sequence = self.time_transformer(
+            timestep_tokens,
+            src_key_padding_mask=time_mask
+        )  # [B, T, d_model]
+        
+        # Step 6: Prediction head for next-step reconstruction
+        preds = self.head(encoded_sequence)  # [B, T, pred_dim]
+        
+        # Hidden state for judge model: the encoded sequence
+        hidden_state = encoded_sequence  # [B, T, transformer_dim]
+        
         return preds, hidden_state
 
 
@@ -953,10 +1053,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--dropout", type=float, default=0.1, help="Dropout rate")
     p.add_argument("--bidirectional", action="store_true", help="Whether to use bidirectional LSTM")
     
-    # Transformer (for FraudEnc)
+    # Transformer (for FraudEnc and FraudFTEnc)
     p.add_argument("--transformer_dim", type=int, default=128, help="Transformer embedding dimension")
-    p.add_argument("--nhead", type=int, default=32, help="Number of attention heads in transformer")
-    p.add_argument("--num_encoder_layers", type=int, default=2, help="Number of transformer encoder layers")
+    p.add_argument("--nhead", type=int, default=4, help="Number of attention heads for time transformer (default: 4, ensures head_dim >= 16 for d_model=128)")
+    p.add_argument("--num_encoder_layers", type=int, default=3, help="Number of time transformer encoder layers")
+    
+    # Feature Transformer (for FraudFTEnc)
+    p.add_argument("--feature_nhead", type=int, default=8, help="Number of attention heads for feature transformer (default: 4)")
+    p.add_argument("--num_feature_layers", type=int, default=1, help="Number of feature transformer encoder layers")
     p.add_argument("--dim_feedforward", type=int, default=0, help="Feedforward dimension (0 = 2 * transformer_dim)")
     p.add_argument("--activation", type=str, default="relu", help="Activation function (relu/gelu)")
     p.add_argument("--norm_first", action="store_true", default = True, help="Apply normalization before attention/ffn (Pre-LN)")

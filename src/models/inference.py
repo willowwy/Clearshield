@@ -187,18 +187,27 @@ def infer_judge(judge_model, predictions, targets, device, hidden_representation
         pred_tensor = torch.tensor(predictions, dtype=torch.float32).unsqueeze(0).to(device)  # [1, pred_dim]
     
     # Process hidden representation
+    # For delta calculation, we need to pass sequence form [B, T, hidden_dim] when available
     hidden_tensor = None
     if hidden_representation is not None:
         if isinstance(hidden_representation, tuple):
             # LSTM: (h_n, c_n) where h_n: [num_layers * num_directions, B, hidden_size]
-            # Take the last layer's hidden state
+            # For LSTM, we only have final hidden state, so delta will be zero
             h_n, c_n = hidden_representation
             hidden_tensor = h_n[-1]  # [B, hidden_size] -> [1, hidden_size] for single sample
         elif len(hidden_representation.shape) == 3:
-            # Transformer: [B, T, hidden_dim], take the last time step
-            hidden_tensor = hidden_representation[:, -1, :]  # [B, hidden_dim] -> [1, hidden_dim] for single sample
+            # Transformer: [B, T, hidden_dim]
+            # Pass the sequence so judge model can calculate delta = hidden[t] - hidden[t-1]
+            # Take last 2 time steps to calculate delta, or just pass the sequence
+            if hidden_representation.shape[1] >= 2:
+                # Pass last 2 time steps as sequence for delta calculation
+                hidden_tensor = hidden_representation[:, -2:, :]  # [B, 2, hidden_dim]
+            else:
+                # Only one time step, pass as is (delta will be zero)
+                hidden_tensor = hidden_representation  # [B, 1, hidden_dim]
         else:
-            # Already [B, hidden_dim]
+            # Already [B, hidden_dim] - single time step without sequence
+            # Delta will be calculated as zero in judge model
             hidden_tensor = hidden_representation
     
     with torch.no_grad():

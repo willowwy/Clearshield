@@ -111,10 +111,35 @@ def extract_judge_training_data(sequence_model, dataloader, device, feature_name
                 # Expand to match sequence length: [B, hidden_size] -> [B, T-1, hidden_size]
                 # Use the same hidden state for all time steps (or we could use the last valid step)
                 hidden_steps = hidden_rep.unsqueeze(1).expand(-1, pred_steps.shape[1], -1)  # [B, T-1, hidden_size]
+                # For LSTM, we don't have sequence of hidden states, so delta is zero
+                # Calculate delta: hidden[t] - hidden[t-1] (all zeros for LSTM since same hidden state)
+                hidden_delta = torch.zeros_like(hidden_steps)  # [B, T-1, hidden_size]
             else:
                 # Transformer: hidden_state is [B, T, transformer_dim]
                 # Take steps corresponding to predictions (excluding last step)
                 hidden_steps = hidden_state[:, :-1, :]  # [B, T-1, transformer_dim]
+                # Calculate delta = hidden[t] - hidden[t-1]
+                # hidden_steps[t] corresponds to time step t in the original sequence
+                # hidden_prev[t] should correspond to time step t-1
+                if hidden_state.shape[1] > 1:
+                    # Get previous time steps: hidden_state[:, :-2, :] gives [B, T-2, transformer_dim]
+                    # This corresponds to time steps 0 to T-3, but we need time steps -1 to T-2
+                    # So we pad with zeros at the beginning
+                    hidden_prev_raw = hidden_state[:, :-2, :] if hidden_state.shape[1] > 2 else hidden_state[:, 0:1, :]  # [B, T-2 or 1, transformer_dim]
+                    # Pad with zeros at the beginning for the first step
+                    zero_pad = torch.zeros(hidden_prev_raw.shape[0], 1, hidden_prev_raw.shape[2], 
+                                          device=hidden_prev_raw.device, dtype=hidden_prev_raw.dtype)  # [B, 1, transformer_dim]
+                    hidden_prev = torch.cat([zero_pad, hidden_prev_raw], dim=1)  # [B, T-1, transformer_dim]
+                    # Now hidden_prev[t] corresponds to time step t-1, matching hidden_steps[t] which is time step t
+                    hidden_delta = hidden_steps - hidden_prev  # [B, T-1, transformer_dim]
+                    # Zero out delta for first step (where there's no previous step)
+                    hidden_delta[:, 0, :] = 0  # First step has no previous, delta is zero
+                else:
+                    # Only one time step, delta is zero
+                    hidden_delta = torch.zeros_like(hidden_steps)  # [B, T-1, transformer_dim]
+            
+            # Concatenate hidden[t] and delta: [B, T-1, hidden_dim * 2]
+            hidden_with_delta = torch.cat([hidden_steps, hidden_delta], dim=2)  # [B, T-1, hidden_dim * 2]
             
             # Only keep valid steps
             valid_mask = valid_steps == 1
@@ -122,7 +147,7 @@ def extract_judge_training_data(sequence_model, dataloader, device, feature_name
                 # Flatten valid data
                 target_valid = target_steps[valid_mask].cpu().numpy()  # [N, pred_dim]
                 label_valid = label_steps[valid_mask].cpu().numpy()  # [N]
-                hidden_valid = hidden_steps[valid_mask].cpu().numpy()  # [N, hidden_dim]
+                hidden_valid = hidden_with_delta[valid_mask].cpu().numpy()  # [N, hidden_dim * 2]
                 
                 if use_pred:
                     pred_valid = pred_steps[valid_mask].cpu().numpy()  # [N, pred_dim]
@@ -441,7 +466,7 @@ def main():
                        help="Use attention mechanism in judge model")
     
     # Loss function parameters for recall optimization
-    parser.add_argument("--loss_type", type=str, default="weighted",
+    parser.add_argument("--loss_type", type=str, default="focal",
                        choices=["cross_entropy", "focal", "weighted", "recall_focused", "adaptive", "hinge"],
                        help="Loss function type for recall optimization")
     parser.add_argument("--focal_alpha", type=float, default=0.25,

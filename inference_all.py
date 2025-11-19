@@ -309,13 +309,21 @@ def infer_single_csv(csv_file, sequence_model_path, judge_model_path, max_len=50
         all_mse.append(mse)
         
         # Process hidden state for judge model
-        # For LSTM: take last layer's hidden state
-        # For Transformer: take last time step
+        # For LSTM: take last layer's hidden state (delta will be zero)
+        # For Transformer: pass sequence to calculate delta = hidden[t] - hidden[t-1]
         if isinstance(hidden_state, tuple):
+            # LSTM: only final hidden state available, delta will be zero
             h_n, c_n = hidden_state
             hidden_rep = h_n[-1]  # [1, hidden_size]
         else:
-            hidden_rep = hidden_state[:, -1, :]  # [1, hidden_dim] - last time step
+            # Transformer: [1, T, hidden_dim]
+            # Pass last 2 time steps to calculate delta, or pass sequence if available
+            if hidden_state.shape[1] >= 2:
+                # Pass last 2 time steps for delta calculation
+                hidden_rep = hidden_state[:, -2:, :]  # [1, 2, hidden_dim]
+            else:
+                # Only one time step, pass as is (delta will be zero)
+                hidden_rep = hidden_state  # [1, 1, hidden_dim]
         
         # Judge model inference
         fraud_prob, is_fraud = infer_judge(judge_model, step_pred_selected, target_features, device, hidden_rep)

@@ -37,8 +37,9 @@ class FraudJudgeDNN(nn.Module):
         input_dim = 0
         
         # Hidden representation is always used (default) or when use_pred is False
+        # Now includes both hidden[t] and delta = hidden[t] - hidden[t-1]
         if hidden_dim is not None:
-            input_dim += hidden_dim  # Hidden representation
+            input_dim += hidden_dim * 2  # Hidden representation + delta
         
         # Predictions are used only when use_pred is True
         if use_pred and use_basic_features:
@@ -112,6 +113,7 @@ class FraudJudgeDNN(nn.Module):
         feature_list = []
         
         # Process hidden representation (always used when available)
+        # Now includes both hidden[t] and delta = hidden[t] - hidden[t-1]
         if hidden_representation is not None:
             if isinstance(hidden_representation, tuple):
                 # LSTM hidden state: (h_n, c_n) where each is [num_layers * num_directions, B, hidden_size]
@@ -119,19 +121,57 @@ class FraudJudgeDNN(nn.Module):
                 # Take the last layer's hidden state
                 # h_n: [num_layers * num_directions, B, hidden_size]
                 # We take the last layer: h_n[-1] -> [B, hidden_size]
-                hidden_agg = h_n[-1]  # [B, hidden_size]
+                hidden_current = h_n[-1]  # [B, hidden_size]
+                # For LSTM, we don't have previous hidden state, so delta is zero
+                # This is a limitation - ideally we should pass sequence of hidden states
+                hidden_delta = torch.zeros_like(hidden_current)  # [B, hidden_size]
+                # Concatenate hidden[t] and delta
+                hidden_with_delta = torch.cat([hidden_current, hidden_delta], dim=1)  # [B, hidden_dim * 2]
             elif len(hidden_representation.shape) == 3:  # [B, T, hidden_dim]
+                # For sequence data, calculate delta = hidden[t] - hidden[t-1]
+                # Take the last time step as hidden[t]
                 if mask is not None:
-                    # Use mask for weighted average
-                    valid_steps = mask.sum(dim=1, keepdim=True).clamp_min(1.0)  # [B, 1]
-                    hidden_agg = (hidden_representation * mask.unsqueeze(-1)).sum(dim=1) / valid_steps  # [B, hidden_dim]
+                    # Find the last valid time step for each sample
+                    # mask: [B, T], find last valid step index
+                    seq_len = hidden_representation.shape[1]
+                    # Create indices for last valid step
+                    last_valid_idx = (mask.cumsum(dim=1).argmax(dim=1)).clamp_max(seq_len - 1)  # [B]
+                    batch_indices = torch.arange(hidden_representation.shape[0], device=hidden_representation.device)  # [B]
+                    hidden_current = hidden_representation[batch_indices, last_valid_idx, :]  # [B, hidden_dim]
+                    
+                    # Calculate delta: hidden[t] - hidden[t-1]
+                    # For first step, delta is zero
+                    prev_idx = (last_valid_idx - 1).clamp_min(0)  # [B]
+                    hidden_prev = hidden_representation[batch_indices, prev_idx, :]  # [B, hidden_dim]
+                    # If last_valid_idx is 0, delta should be zero
+                    is_first_step = (last_valid_idx == 0).unsqueeze(-1)  # [B, 1]
+                    hidden_delta = hidden_current - hidden_prev  # [B, hidden_dim]
+                    hidden_delta = hidden_delta * (~is_first_step).float()  # Zero out delta for first step
                 else:
-                    # Simple average
-                    hidden_agg = hidden_representation.mean(dim=1)  # [B, hidden_dim]
-            else:  # [B, hidden_dim]
-                hidden_agg = hidden_representation  # [B, hidden_dim]
+                    # Take last time step
+                    hidden_current = hidden_representation[:, -1, :]  # [B, hidden_dim]
+                    # Calculate delta: hidden[t] - hidden[t-1]
+                    if hidden_representation.shape[1] > 1:
+                        hidden_prev = hidden_representation[:, -2, :]  # [B, hidden_dim]
+                        hidden_delta = hidden_current - hidden_prev  # [B, hidden_dim]
+                    else:
+                        # Only one time step, delta is zero
+                        hidden_delta = torch.zeros_like(hidden_current)  # [B, hidden_dim]
+                # Concatenate hidden[t] and delta
+                hidden_with_delta = torch.cat([hidden_current, hidden_delta], dim=1)  # [B, hidden_dim * 2]
+            else:  # [B, hidden_dim] or [B, hidden_dim * 2]
+                # Check if already contains delta (from training data extraction)
+                if hidden_representation.shape[1] == self.hidden_dim * 2:
+                    # Already contains hidden[t] and delta concatenated
+                    hidden_with_delta = hidden_representation  # [B, hidden_dim * 2]
+                else:
+                    # Single time step without delta, calculate delta as zero
+                    hidden_current = hidden_representation  # [B, hidden_dim]
+                    hidden_delta = torch.zeros_like(hidden_current)  # [B, hidden_dim]
+                    # Concatenate hidden[t] and delta
+                    hidden_with_delta = torch.cat([hidden_current, hidden_delta], dim=1)  # [B, hidden_dim * 2]
             
-            feature_list.append(hidden_agg)  # [B, hidden_dim]
+            feature_list.append(hidden_with_delta)  # [B, hidden_dim * 2]
         
         # Process predictions and targets (only when use_pred=True)
         if self.use_pred and predictions is not None:
