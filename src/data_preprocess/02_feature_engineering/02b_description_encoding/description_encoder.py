@@ -27,8 +27,15 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_TEXT_COLUMN = "Transaction Description"
-DEFAULT_RAW_ROOT = PROJECT_ROOT / "data" / "cleaned"
-DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "data" / "clustered_out"
+
+try:
+    from .run_pipeline import DEFAULT_RAW_ROOT, DEFAULT_OUTPUT_ROOT
+except ImportError:  # pragma: no cover - fallback when run as a script
+    try:
+        from run_pipeline import DEFAULT_RAW_ROOT, DEFAULT_OUTPUT_ROOT  # type: ignore
+    except ImportError:
+        DEFAULT_RAW_ROOT = PROJECT_ROOT / "data" / "cleaned"
+        DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "data" / "clustered_out"
 DEFAULT_CLUSTER_COUNT = 60
 
 __all__ = [

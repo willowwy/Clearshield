@@ -12,6 +12,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_RAW_ROOT = PROJECT_ROOT / "data" / "cleaned"
+DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "data" / "clustered_out"
+
 import numpy as np
 import pandas as pd
 from sklearn.cluster import MiniBatchKMeans
@@ -19,8 +23,6 @@ from sklearn.cluster import MiniBatchKMeans
 try:  # Prefer relative imports when executed as a module.
     from .description_encoder import (
         DEFAULT_MODEL_NAME,
-        DEFAULT_OUTPUT_ROOT,
-        DEFAULT_RAW_ROOT,
         DEFAULT_TEXT_COLUMN,
         encode_texts,
         reduce_pca,
@@ -33,8 +35,6 @@ except ImportError:  # pragma: no cover - fallback for `python run_pipeline.py`
         sys.path.append(str(CURRENT_DIR))
     from description_encoder import (  # type: ignore
         DEFAULT_MODEL_NAME,
-        DEFAULT_OUTPUT_ROOT,
-        DEFAULT_RAW_ROOT,
         DEFAULT_TEXT_COLUMN,
         encode_texts,
         reduce_pca,
