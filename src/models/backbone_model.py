@@ -6,50 +6,59 @@ import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 
-class AttentionPooling(nn.Module):
-    """Attention-based pooling to aggregate feature tokens into a single timestep token.
+class MultiHeadAttentionPooling(nn.Module):
+    """Multi-head attention-based pooling to aggregate feature tokens into a single timestep token.
     
-    Instead of mean pooling, uses learned attention weights:
-    weights = softmax(MLP(feature_tokens))
-    token = Σ(weights * feature_tokens)
+    Uses multiple attention heads to learn different feature importance patterns:
+    - Each head computes: weights_i = softmax(MLP_i(feature_tokens))
+    - Each head pools: token_i = Σ(weights_i * feature_tokens)
+    - Concatenate all heads: token = concat([token_1, token_2, ..., token_h])
+    - Project back to d_model: output = Linear(token)
+    
+    This is similar to Performer / TabNet / FT-Transformer multi-head pooling.
     """
-    def __init__(self, d_model: int, dropout: float = 0.1):
+    def __init__(self, d_model, num_heads=4, dropout=0.1):
         super().__init__()
-        self.d_model = d_model
-        # MLP to compute attention weights
-        self.attention_mlp = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, 1),
-        )
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-    
-    def forward(self, feature_tokens: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            feature_tokens: [B, T, F, d_model] - feature tokens for each timestep
-        Returns:
-            timestep_tokens: [B, T, d_model] - aggregated tokens for each timestep
-        """
-        B, T, F, d = feature_tokens.shape
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
         
-        # Compute attention weights for each feature
-        # feature_tokens: [B, T, F, d] -> [B*T, F, d]
-        feature_tokens_flat = feature_tokens.reshape(B * T, F, d)
+        # One linear projection per head for scoring
+        self.score_proj = nn.Linear(d_model, num_heads)
         
-        # Compute attention scores: [B*T, F, 1]
-        attention_scores = self.attention_mlp(feature_tokens_flat)  # [B*T, F, 1]
-        attention_weights = torch.softmax(attention_scores, dim=1)  # [B*T, F, 1]
-        attention_weights = self.dropout(attention_weights)
+        # Final projection after concatenation
+        self.output_proj = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x):
+        # x: [B, T, F, d]
+        B, T, F, d = x.shape
         
-        # Weighted sum: [B*T, F, d] * [B*T, F, 1] -> [B*T, d]
-        timestep_tokens_flat = (feature_tokens_flat * attention_weights).sum(dim=1)  # [B*T, d]
+        # LayerNorm over last dim only
+        x = self.norm(x)  # [B, T, F, d]
         
-        # Reshape back: [B*T, d] -> [B, T, d]
-        timestep_tokens = timestep_tokens_flat.reshape(B, T, d)
+        # Compute scores: [B, T, F, num_heads]
+        scores = self.score_proj(x)
         
-        return timestep_tokens
+        # softmax over F (features)
+        weights = torch.softmax(scores, dim=2)  # [B, T, F, num_heads]
+        weights = self.dropout(weights)
+
+        # Rearrange for pooling
+        # x: [B, T, F, d] → [B, T, F, num_heads, head_dim]
+        x_heads = x.view(B, T, F, self.num_heads, self.head_dim)
+
+        # weights: [B, T, F, num_heads] → [B, T, F, num_heads, 1]
+        weights = weights.unsqueeze(-1)
+
+        # Weighted sum over F
+        # result: [B, T, num_heads, head_dim]
+        pooled = (x_heads * weights).sum(dim=2)
+
+        # Merge heads → [B, T, d]
+        pooled = pooled.reshape(B, T, d)
+
+        return self.output_proj(pooled)
 
 
 class GatedResidualNetwork(nn.Module):
@@ -843,9 +852,12 @@ class FraudFTEnc(nn.Module):
             feature_encoder_layer, num_layers=num_feature_layers
         )
         
-        # Attention pooling: aggregate F feature tokens into 1 timestep token
-        self.attention_pooling = AttentionPooling(
+        # Multi-head attention pooling: aggregate F feature tokens into 1 timestep token
+        # Uses multiple heads to learn different feature importance patterns
+        pooling_num_heads = getattr(args, 'pooling_num_heads', 4)
+        self.attention_pooling = MultiHeadAttentionPooling(
             d_model=transformer_dim,
+            num_heads=pooling_num_heads,
             dropout=getattr(args, 'dropout', 0.1),
         )
         
@@ -992,7 +1004,16 @@ class FraudFTEnc(nn.Module):
         
         # Step 3: Attention Pooling - aggregate F feature tokens into 1 timestep token
         # [B, T, F, d] -> [B, T, d]
-        timestep_tokens = self.attention_pooling(feature_encoded_3d)  # [B, T, d_model]
+        # Multi-head pooling with LayerNorm (already inside MultiHeadAttentionPooling)
+        pooled_tokens = self.attention_pooling(feature_encoded_3d)  # [B, T, d_model]
+        
+        # Residual connection: add mean of feature tokens to prevent information loss
+        # This helps preserve information from all features, not just the pooled representation
+        # mean(feature_tokens): [B, T, F, d] -> [B, T, d]
+        feature_mean = feature_encoded_3d.mean(dim=2)  # [B, T, d_model]
+        
+        # Residual: time_token = pooled + mean(feature_tokens)
+        timestep_tokens = pooled_tokens + feature_mean  # [B, T, d_model]
         
         # Step 4: Add time positional encoding
         time_positions = torch.arange(0, T, device=timestep_tokens.device).unsqueeze(0).expand(B, -1)  # [B, T]
@@ -1059,8 +1080,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--num_encoder_layers", type=int, default=3, help="Number of time transformer encoder layers")
     
     # Feature Transformer (for FraudFTEnc)
-    p.add_argument("--feature_nhead", type=int, default=8, help="Number of attention heads for feature transformer (default: 4)")
+    p.add_argument("--feature_nhead", type=int, default=4, help="Number of attention heads for feature transformer (default: 4)")
     p.add_argument("--num_feature_layers", type=int, default=1, help="Number of feature transformer encoder layers")
+    p.add_argument("--pooling_num_heads", type=int, default=4, help="Number of heads for multi-head attention pooling (default: 4)")
     p.add_argument("--dim_feedforward", type=int, default=0, help="Feedforward dimension (0 = 2 * transformer_dim)")
     p.add_argument("--activation", type=str, default="relu", help="Activation function (relu/gelu)")
     p.add_argument("--norm_first", action="store_true", default = True, help="Apply normalization before attention/ffn (Pre-LN)")

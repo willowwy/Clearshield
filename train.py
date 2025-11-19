@@ -680,7 +680,7 @@ def main():
     parser.add_argument("--use_amp", action="store_true", help="Use mixed precision training (AMP)")
     
     # Loss options
-    parser.add_argument("--loss_type", type=str, default="mse", choices=["bce", "huber", "pseudohuber", "quantile"], help="Choose loss function")
+    parser.add_argument("--loss_type", type=str, default="mse", choices=["mse", "mae", "bce", "huber", "pseudohuber", "quantile"], help="Choose loss function")
     parser.add_argument("--delta", type=float, default=10, help="Huber/Pseudo-Huber delta (δ)")
     parser.add_argument("--auto_delta_p", type=float, default=0.9, help="Auto delta: p-quantile of residual |e|, e.g., 0.9")
     parser.add_argument("--quantiles", type=str, default="0.1,0.5,0.9", help="Quantile list, comma-separated")
