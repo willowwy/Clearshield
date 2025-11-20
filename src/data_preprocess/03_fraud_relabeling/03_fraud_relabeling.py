@@ -5,16 +5,18 @@ from glob import glob
 from datetime import timedelta
 
 # Configuration
-INPUT_DIR = '../../../data/clustered_out'
-OUTPUT_MEMBER_DIR = '../../../data/by_member'
-OUTPUT_PROCESSED_DIR = '../../../data/processed'
+INPUT_DIR = '../../../data/train/clustered_out'
+OUTPUT_MEMBER_DIR = '../../../data/train/by_member/temp'
+OUTPUT_PROCESSED_DIR = '../../../data/train/by_member'
 CHUNKSIZE = 50000
 MIN_HISTORY_LENGTH = 10  # Minimum number of transactions required
 
 
 def reorganize_by_member(input_dir, output_dir, chunksize):
     """Reorganize transaction files by member"""
+    # Ensure temp directory exists
     os.makedirs(output_dir, exist_ok=True)
+
     all_files = sorted(glob(os.path.join(input_dir, '*.csv')))
 
     if not all_files:
@@ -22,44 +24,57 @@ def reorganize_by_member(input_dir, output_dir, chunksize):
         return 0
 
     print(f"Found {len(all_files)} files")
-    member_files_created = set()
+    member_files_modified = set()  # Track all modified files (created + appended)
 
     for i, file_path in enumerate(all_files, 1):
         print(f"Processing {i}/{len(all_files)}: {os.path.basename(file_path)}")
         try:
-            for chunk in pd.read_csv(file_path, chunksize=chunksize, low_memory=False):
+            for chunk in pd.read_csv(file_path, chunksize=chunksize, low_memory=False, dtype={'Product ID': str}):
                 grouped = chunk.groupby('Member ID')
 
                 for member_id, member_data in grouped:
                     member_file = os.path.join(output_dir, f"member_{member_id}.csv")
                     file_exists = os.path.exists(member_file)
 
-                    if member_file in member_files_created or file_exists:
+                    if member_file in member_files_modified or file_exists:
                         member_data.to_csv(member_file, mode='a', header=False, index=False)
                     else:
                         member_data.to_csv(member_file, mode='w', header=True, index=False)
-                        member_files_created.add(member_file)
+
+                    # Track this file as modified (whether created or appended)
+                    member_files_modified.add(member_file)
         except Exception as e:
             print(f"Error: {e}")
             continue
 
-    print(f"Created {len(member_files_created)} member files")
-    print("Sorting files...")
+    print(f"Modified {len(member_files_modified)} member files this run")
+    print("Sorting modified files...")
 
-    for i, member_file in enumerate(list(member_files_created), 1):
+    member_files_to_sort = sorted(list(member_files_modified))
+    for i, member_file in enumerate(member_files_to_sort, 1):
         if i % 1000 == 0:
-            print(f"  Sorted {i}/{len(member_files_created)} files")
+            print(f"  Sorted {i}/{len(member_files_to_sort)} files")
         try:
-            df = pd.read_csv(member_file, low_memory=False)
+            df = pd.read_csv(member_file, low_memory=False, dtype={'Product ID': str})
+            # Parse date for sorting (already cleaned to MM/DD/YYYY in Stage 1)
             df['Post Date'] = pd.to_datetime(df['Post Date'])
-            sort_cols = ['Post Date', 'Post Time'] if 'Post Time' in df.columns else ['Post Date']
+
+            # Build sort columns
+            sort_cols = ['Post Date']
+            if 'Post Time' in df.columns:
+                # Convert Post Time to numeric for proper sorting
+                df['Post Time'] = pd.to_numeric(df['Post Time'], errors='coerce')
+                sort_cols.append('Post Time')
+
             df = df.sort_values(sort_cols)
+            # Convert back to MM/DD/YYYY to maintain cleaned format
+            df['Post Date'] = df['Post Date'].dt.strftime('%m/%d/%Y')
             df.to_csv(member_file, index=False)
         except Exception as e:
             print(f"Error sorting {os.path.basename(member_file)}: {e}")
             continue
 
-    return len(member_files_created)
+    return len(member_files_modified)
 
 
 def extract_fraud_date_from_description(description, adjustment_date):
@@ -203,6 +218,8 @@ def process_single_member_fraud(member_data):
     fraud_adjustments = df[(fraud_col != 'nan') & (fraud_col.str.strip() != '')]
 
     if fraud_adjustments.empty:
+        # Convert back to original format before returning
+        df['Post Date'] = df['Post Date'].dt.strftime('%m/%d/%Y')
         return df, 0, 0
 
     used_indices = set()
@@ -227,6 +244,9 @@ def process_single_member_fraud(member_data):
     if adjustment_indices_to_remove:
         df = df.drop(adjustment_indices_to_remove).reset_index(drop=True)
 
+    # Convert back to original format before returning
+    df['Post Date'] = df['Post Date'].dt.strftime('%m/%d/%Y')
+
     return df, matched_count, total_adjustments
 
 
@@ -234,13 +254,14 @@ def process_member_files_for_fraud(member_dir, output_dir, min_history_length=No
     """Process member files for fraud detection - keep all records intact
 
     Args:
-        member_dir: Directory containing member files
-        output_dir: Output directory for processed files
+        member_dir: Directory containing member files (temp directory)
+        output_dir: Output directory for processed files (by_member directory)
         min_history_length: Minimum transaction count required (None = use global MIN_HISTORY_LENGTH)
     """
     if min_history_length is None:
         min_history_length = MIN_HISTORY_LENGTH
 
+    # Ensure output subdirectories exist
     for subdir in ['matched', 'unmatched', 'no_fraud']:
         os.makedirs(os.path.join(output_dir, subdir), exist_ok=True)
 
@@ -257,7 +278,7 @@ def process_member_files_for_fraud(member_dir, output_dir, min_history_length=No
         if i % 1000 == 0:
             print(f"  Processed {i}/{len(member_files)} members")
         try:
-            df = pd.read_csv(member_file, low_memory=False)
+            df = pd.read_csv(member_file, low_memory=False, dtype={'Product ID': str})
             member_id = os.path.basename(member_file).replace('member_', '').replace('.csv', '')
 
             # Filter by minimum history length
@@ -316,6 +337,12 @@ def process_member_files_for_fraud(member_dir, output_dir, min_history_length=No
     summary_path = os.path.join(output_dir, 'member_summary.csv')
     summary_df.to_csv(summary_path, index=False)
     print(f"Summary saved to: {summary_path}")
+
+    # Clean up temporary member directory if it exists
+    if 'temp' in member_dir and os.path.exists(member_dir):
+        import shutil
+        shutil.rmtree(member_dir)
+        print(f"\nCleaned up temporary directory: {member_dir}")
 
     return stats
 

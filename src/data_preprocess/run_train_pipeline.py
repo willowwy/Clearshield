@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ClearShield - Automated Data Processing Pipeline
+ClearShield - Automated Training Data Processing Pipeline
 Runs the complete 4-stage preprocessing pipeline automatically.
 """
 
@@ -17,6 +17,13 @@ os.environ['OBJC_DISABLE_INITIALIZE_FORK_SAFETY'] = 'YES'
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
+
+# Add project root to path
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+# Import centralized configuration
+from config.pipeline_config import get_train_config
 
 
 def load_module(module_name, file_path):
@@ -45,34 +52,15 @@ def print_stage_footer(stage_num, stage_name, elapsed):
     print("=" * 70 + "\n")
 
 
-def setup_directories():
-    """Create necessary directories"""
-    directories = [
-        '../../data/train/raw',
-        '../../data/train/cleaned',
-        '../../data/train/clustered_out',
-        '../../data/train/by_member',
-        '../../data/train/processed/matched',
-        '../../data/train/processed/unmatched',
-        '../../data/train/processed/no_fraud',
-        '../../data/train/final/matched',
-        '../../data/train/final/unmatched',
-        '../../data/train/final/no_fraud',
-    ]
-
-    for directory in directories:
-        Path(directory).mkdir(parents=True, exist_ok=True)
-
-
-def stage1_data_cleaning(dc, verbose=True):
+def stage1_data_cleaning(dc, config, verbose=True):
     """Stage 1: Data Cleaning"""
     start_time = datetime.now()
     print_stage_header(1, "Data Cleaning")
 
-    # Configure
+    # Configure using centralized config
     dc.ENABLE_RENAMING = True
-    dc.RAW_DIR = '../../data/train/raw'
-    dc.CLEANED_DIR = '../../data/train/cleaned'
+    dc.RAW_DIR = str(config.get_path('raw'))
+    dc.CLEANED_DIR = str(config.get_path('cleaned'))
 
     if verbose:
         print(f"Input:  {dc.RAW_DIR}")
@@ -86,26 +74,32 @@ def stage1_data_cleaning(dc, verbose=True):
     return elapsed
 
 
-def stage2_feature_engineering(fe, verbose=True):
+def stage2_feature_engineering(fe, config, verbose=True):
     """Stage 2: Feature Engineering - Description Encoding and Clustering"""
     start_time = datetime.now()
     print_stage_header(2, "Feature Engineering")
 
-    # Configure exactly like ipynb
-    fe.PROCESSED_DIR = '../../data/train/cleaned'
-    fe.MODEL_NAME = 'prajjwal1/bert-tiny'
-    fe.TEXT_COLUMN = 'Transaction Description'
-    fe.BATCH_SIZE = 64
-    fe.MAX_LENGTH = 64
-    fe.PCA_DIM = 20
-    fe.MIN_K = 10
-    fe.MAX_K = 60
-    fe.K_STEP = 10
-    fe.SAMPLE_SIZE = 10000
-    fe.CLUSTER_BATCH_SIZE = 4096
-    fe.RANDOM_STATE = 42
+    # Configure using centralized config
+    fe_params = config.feature_engineering
+    fe.PROCESSED_DIR = str(config.get_path('cleaned'))
+    fe.MODEL_NAME = fe_params['model_name']
+    fe.TEXT_COLUMN = fe_params['text_column']
+    fe.BATCH_SIZE = fe_params['batch_size']
+    fe.MAX_LENGTH = fe_params['max_length']
+    fe.PCA_DIM = fe_params['pca_dim']
+    fe.MIN_K = fe_params['min_k']
+    fe.MAX_K = fe_params['max_k']
+    fe.K_STEP = fe_params['k_step']
+    fe.SAMPLE_SIZE = fe_params['sample_size']
+    fe.CLUSTER_BATCH_SIZE = fe_params['cluster_batch_size']
+    fe.RANDOM_STATE = fe_params['random_state']
 
-    # Run exactly like ipynb
+    if verbose:
+        print(f"Input:  {fe.PROCESSED_DIR}")
+        print(f"Model:  {fe.MODEL_NAME}")
+        print(f"PCA Dim: {fe.PCA_DIM}, Clusters: {fe.MIN_K}-{fe.MAX_K}\n")
+
+    # Run
     outputs = fe.main()
 
     elapsed = (datetime.now() - start_time).total_seconds()
@@ -113,19 +107,24 @@ def stage2_feature_engineering(fe, verbose=True):
     return elapsed
 
 
-def stage3_fraud_matching(fr, min_history_length=10, verbose=True):
+def stage3_fraud_matching(fr, config, min_history_length=None, verbose=True):
     """Stage 3: Fraud Matching and Re-labeling"""
     start_time = datetime.now()
     print_stage_header(3, "Fraud Matching and Re-labeling")
 
-    # Configure
-    fr.INPUT_DIR = '../../data/train/clustered_out'
-    fr.OUTPUT_MEMBER_DIR = '../../data/train/by_member'
-    fr.OUTPUT_PROCESSED_DIR = '../../data/train/processed'
-    fr.CHUNKSIZE = 50000
+    # Use config default if not specified
+    if min_history_length is None:
+        min_history_length = config.fraud_matching['min_history_length']
+
+    # Configure using centralized config
+    fr.INPUT_DIR = str(config.get_path('clustered'))
+    fr.OUTPUT_MEMBER_DIR = str(config.get_path('by_member_temp'))
+    fr.OUTPUT_PROCESSED_DIR = str(config.get_path('by_member'))
+    fr.CHUNKSIZE = config.fraud_matching['chunksize']
 
     if verbose:
         print(f"Input:  {fr.INPUT_DIR}")
+        print(f"Temp:   {fr.OUTPUT_MEMBER_DIR}")
         print(f"Output: {fr.OUTPUT_PROCESSED_DIR}")
         print(f"Min History Length: {min_history_length}\n")
 
@@ -142,15 +141,15 @@ def stage3_fraud_matching(fr, min_history_length=10, verbose=True):
     return elapsed
 
 
-def stage4_encoding(enc, verbose=True):
+def stage4_encoding(enc, config, verbose=True):
     """Stage 4: Feature Encoding"""
     start_time = datetime.now()
     print_stage_header(4, "Feature Encoding")
 
-    # Configure
-    enc.PROCESSED_DIR = '../../data/train/processed'
-    enc.OUTPUT_DIR = '../../data/train/final'
-    enc.CONFIG_PATH = '../../config/tokenize_dict.json'
+    # Configure using centralized config
+    enc.PROCESSED_DIR = str(config.get_path('by_member'))
+    enc.OUTPUT_DIR = str(config.get_path('final'))
+    enc.CONFIG_PATH = str(config.get_path('tokenize_config'))
 
     if verbose:
         print(f"Input:  {enc.PROCESSED_DIR}")
@@ -168,13 +167,13 @@ def stage4_encoding(enc, verbose=True):
 def run_pipeline():
     """Main pipeline execution"""
     parser = argparse.ArgumentParser(
-        description='ClearShield Automated Data Processing Pipeline',
+        description='ClearShield Automated Training Data Processing Pipeline',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python run_pipeline.py                    # Run complete pipeline
-  python run_pipeline.py --skip-cleaning    # Skip data cleaning step
-  python run_pipeline.py --min-history 15   # Set minimum history to 15
+  python run_train_pipeline.py                    # Run complete pipeline
+  python run_train_pipeline.py --skip-cleaning    # Skip data cleaning step
+  python run_train_pipeline.py --min-history 15   # Set minimum history to 15
         """
     )
 
@@ -186,26 +185,35 @@ Examples:
                         help='Skip Stage 3: Fraud Matching')
     parser.add_argument('--skip-encoding', action='store_true',
                         help='Skip Stage 4: Feature Encoding')
-    parser.add_argument('--min-history', type=int, default=10,
-                        help='Minimum transaction history length (default: 10)')
+    parser.add_argument('--min-history', type=int, default=None,
+                        help='Minimum transaction history length (default: from config)')
     parser.add_argument('--quiet', action='store_true',
                         help='Reduce output verbosity')
 
     args = parser.parse_args()
 
+    # Initialize configuration
+    config = get_train_config()
+
     # Print header
     print("\n" + "=" * 70)
-    print("ClearShield - Automated Data Processing Pipeline")
+    print("ClearShield - Automated Training Data Processing Pipeline")
     print("=" * 70)
     print(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 70)
+
+    if not args.quiet:
+        print("\nConfiguration:")
+        print(f"  Mode: {config.mode}")
+        print(f"  Project Root: {config.PROJECT_ROOT}")
+        print(f"  Min History: {args.min_history if args.min_history else config.fraud_matching['min_history_length']}")
 
     pipeline_start = datetime.now()
     timings = {}
 
     # Setup directories
     print("\nSetting up directories...")
-    setup_directories()
+    config.create_directories(verbose=not args.quiet)
     print("Directories ready\n")
 
     # Load modules
@@ -221,25 +229,25 @@ Examples:
     try:
         # Stage 1: Data Cleaning
         if not args.skip_cleaning:
-            timings['Stage 1'] = stage1_data_cleaning(dc, verbose)
+            timings['Stage 1'] = stage1_data_cleaning(dc, config, verbose)
         else:
             print("\nSkipping Stage 1: Data Cleaning\n")
 
         # Stage 2: Feature Engineering
         if not args.skip_feature_engineering:
-            timings['Stage 2'] = stage2_feature_engineering(fe, verbose)
+            timings['Stage 2'] = stage2_feature_engineering(fe, config, verbose)
         else:
             print("\nSkipping Stage 2: Feature Engineering\n")
 
         # Stage 3: Fraud Matching
         if not args.skip_fraud_matching:
-            timings['Stage 3'] = stage3_fraud_matching(fr, args.min_history, verbose)
+            timings['Stage 3'] = stage3_fraud_matching(fr, config, args.min_history, verbose)
         else:
             print("\nSkipping Stage 3: Fraud Matching\n")
 
         # Stage 4: Encoding
         if not args.skip_encoding:
-            timings['Stage 4'] = stage4_encoding(enc, verbose)
+            timings['Stage 4'] = stage4_encoding(enc, config, verbose)
         else:
             print("\nSkipping Stage 4: Feature Encoding\n")
 
@@ -257,7 +265,11 @@ Examples:
             for stage, elapsed in timings.items():
                 print(f"  {stage}: {elapsed:.2f}s ({elapsed / 60:.2f}m)")
 
-        print("\nFinal Output: ../../data/train/final/")
+        print(f"\nIntermediate Output: {config.get_path('by_member')}")
+        print("  - matched/")
+        print("  - unmatched/")
+        print("  - no_fraud/")
+        print(f"\nFinal Output: {config.get_path('final')}")
         print("  - matched/")
         print("  - unmatched/")
         print("  - no_fraud/")

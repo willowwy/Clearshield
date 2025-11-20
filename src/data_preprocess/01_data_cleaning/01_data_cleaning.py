@@ -90,7 +90,7 @@ def process_csv_file(file_path, output_dir):
     # Normalize headers
     normalized_header = normalize_header(all_rows[0])
 
-    # Get column indices
+    # Get column indices for frequently used fields
     try:
         idx_map = {h: normalized_header.index(h) for h in [
             'Amount', 'Product ID', 'Action Type', 'Source Type',
@@ -102,6 +102,12 @@ def process_csv_file(file_path, output_dir):
     cleaned_rows = [normalized_header]
     fixed_comma = fixed_missing = fixed_amount = fixed_newlines = 0
     first_date = last_date = None
+
+    # Pre-compute index for Account Open Date if present
+    try:
+        account_open_date_idx = normalized_header.index('Account Open Date')
+    except ValueError:
+        account_open_date_idx = None
 
     # Process data rows
     for row in all_rows[1:]:
@@ -142,18 +148,18 @@ def process_csv_file(file_path, output_dir):
                     fields[amount_idx] = cleaned_amount
                     fixed_amount += 1
 
-        # Track date range
+        # Track date range (for filename generation) using Post Date
         if 'Post Date' in idx_map:
             try:
                 date_str = fields[idx_map['Post Date']].strip()
                 if date_str:
-                    date_val = pd.to_datetime(date_str, format='%m/%d/%Y', errors='coerce')
+                    date_val = pd.to_datetime(date_str, errors='coerce')
                     if pd.notna(date_val):
                         if first_date is None or date_val < first_date:
                             first_date = date_val
                         if last_date is None or date_val > last_date:
                             last_date = date_val
-            except:
+            except Exception:
                 pass
 
         # Fill missing values
@@ -171,6 +177,40 @@ def process_csv_file(file_path, output_dir):
                     if not val or val.lower() == 'null':
                         fields[idx] = fill_val
                         fixed_missing += 1
+
+        # === NEW: format Amount to 2 decimal places ===
+        if 'Amount' in idx_map:
+            amount_idx = idx_map['Amount']
+            if 0 <= amount_idx < len(fields):
+                val = fields[amount_idx].strip()
+                if val != '':
+                    try:
+                        num = float(val)
+                        # Format as string with exactly two decimal places
+                        fields[amount_idx] = f"{num:.2f}"
+                    except ValueError:
+                        # If conversion fails, keep original value
+                        pass
+
+        # === NEW: normalize Post Date to MM/DD/YYYY format ===
+        if 'Post Date' in idx_map:
+            pd_idx = idx_map['Post Date']
+            if 0 <= pd_idx < len(fields):
+                date_str = fields[pd_idx].strip()
+                if date_str:
+                    date_val = pd.to_datetime(date_str, errors='coerce')
+                    if pd.notna(date_val):
+                        # Format as MM/DD/YYYY (zero-padded)
+                        fields[pd_idx] = date_val.strftime('%m/%d/%Y')
+
+        # === NEW: normalize Account Open Date to MM/DD/YYYY format ===
+        if account_open_date_idx is not None and 0 <= account_open_date_idx < len(fields):
+            ao_str = fields[account_open_date_idx].strip()
+            if ao_str:
+                ao_val = pd.to_datetime(ao_str, errors='coerce')
+                if pd.notna(ao_val):
+                    # Format as MM/DD/YYYY (zero-padded)
+                    fields[account_open_date_idx] = ao_val.strftime('%m/%d/%Y')
 
         cleaned_rows.append(fields)
 
@@ -198,7 +238,8 @@ def process_csv_file(file_path, output_dir):
 
     # Determine output filename
     output_filename = os.path.basename(file_path)
-    if ENABLE_RENAMING and first_date and last_date:
+    if ENABLE_RENAMING and first_date is not None and last_date is not None:
+        # NOTE: Keep "-" in filenames to avoid using "/" in file paths
         first_str = first_date.strftime('%m-%d-%Y')
         last_str = last_date.strftime('%m-%d-%Y')
         output_filename = f"{first_str}_to_{last_str}.csv"
@@ -224,6 +265,7 @@ def process_csv_file(file_path, output_dir):
     }
 
     return stats, None
+
 
 
 def main():
