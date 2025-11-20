@@ -30,7 +30,7 @@ class FinalDataLoader:
     Handles data from ../data/final/ directory structure.
     """
 
-    def __init__(self, final_data_path: str = "../data/final"):
+    def __init__(self, final_data_path: str = "../data/train/final"):
         """
         Initialize the data loader.
 
@@ -1969,7 +1969,7 @@ if __name__ == "__main__":
 
     # Configure to load from your final folder
     config = TestSuiteConfig(
-        final_data_path="../data/final",   # Path to your final folder
+        final_data_path="../data/train/final",   # Path to your final folder
         data_file_pattern="*.csv",         # Or "*.pkl", "*.parquet", etc.
         data_sample_size=1000,             # Optional: sample size for testing
         verbose=True
