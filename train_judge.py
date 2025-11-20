@@ -48,7 +48,7 @@ def resolve_target_indices(feature_names, model_args):
     return target_indices, resolved_target_names, target_names
 
 
-def extract_judge_training_data(sequence_model, dataloader, device, feature_names, target_indices, target_names, use_pred=False):
+def extract_judge_training_data(sequence_model, dataloader, device, feature_names, target_indices, target_names, use_pred=False, max_len=50):
     """
     Extract training data for judge model using sequence model predictions and hidden states
     
@@ -101,61 +101,78 @@ def extract_judge_training_data(sequence_model, dataloader, device, feature_name
             valid_steps = mask[:, 1:]  # [B, T-1]
             label_steps = y[:, 1:]  # [B, T-1]
             
-            # Process hidden state
+            # Process hidden state for sequence-based CNN processing
+            # For each time step, extract sequence up to that point (or last max_len steps)
             # For LSTM: hidden_state is (h_n, c_n) where h_n: [num_layers * num_directions, B, hidden_size]
             # For Transformer: hidden_state is [B, T, transformer_dim]
             if isinstance(hidden_state, tuple):
-                # LSTM: take last layer's hidden state
+                # LSTM: take last layer's hidden state and expand to sequence
                 h_n, c_n = hidden_state
                 hidden_rep = h_n[-1]  # [B, hidden_size]
-                # Expand to match sequence length: [B, hidden_size] -> [B, T-1, hidden_size]
-                # Use the same hidden state for all time steps (or we could use the last valid step)
-                hidden_steps = hidden_rep.unsqueeze(1).expand(-1, pred_steps.shape[1], -1)  # [B, T-1, hidden_size]
-                # For LSTM, we don't have sequence of hidden states, so delta is zero
-                # Calculate delta: hidden[t] - hidden[t-1] (all zeros for LSTM since same hidden state)
-                hidden_delta = torch.zeros_like(hidden_steps)  # [B, T-1, hidden_size]
+                # For LSTM, we don't have sequence, so use the same hidden state for all time steps
+                # Expand to [B, T-1, hidden_size] - each time step uses the same hidden state
+                hidden_sequences = hidden_rep.unsqueeze(1).expand(-1, pred_steps.shape[1], -1)  # [B, T-1, hidden_size]
+                # For LSTM, we'll use the full sequence (all same values) for each step
+                full_hidden_seq = hidden_rep.unsqueeze(1).expand(-1, max_len, -1)  # [B, max_len, hidden_size]
             else:
                 # Transformer: hidden_state is [B, T, transformer_dim]
-                # Take steps corresponding to predictions (excluding last step)
-                hidden_steps = hidden_state[:, :-1, :]  # [B, T-1, transformer_dim]
-                # Calculate delta = hidden[t] - hidden[t-1]
-                # hidden_steps[t] corresponds to time step t in the original sequence
-                # hidden_prev[t] should correspond to time step t-1
-                if hidden_state.shape[1] > 1:
-                    # Get previous time steps: hidden_state[:, :-2, :] gives [B, T-2, transformer_dim]
-                    # This corresponds to time steps 0 to T-3, but we need time steps -1 to T-2
-                    # So we pad with zeros at the beginning
-                    hidden_prev_raw = hidden_state[:, :-2, :] if hidden_state.shape[1] > 2 else hidden_state[:, 0:1, :]  # [B, T-2 or 1, transformer_dim]
-                    # Pad with zeros at the beginning for the first step
-                    zero_pad = torch.zeros(hidden_prev_raw.shape[0], 1, hidden_prev_raw.shape[2], 
-                                          device=hidden_prev_raw.device, dtype=hidden_prev_raw.dtype)  # [B, 1, transformer_dim]
-                    hidden_prev = torch.cat([zero_pad, hidden_prev_raw], dim=1)  # [B, T-1, transformer_dim]
-                    # Now hidden_prev[t] corresponds to time step t-1, matching hidden_steps[t] which is time step t
-                    hidden_delta = hidden_steps - hidden_prev  # [B, T-1, transformer_dim]
-                    # Zero out delta for first step (where there's no previous step)
-                    hidden_delta[:, 0, :] = 0  # First step has no previous, delta is zero
-                else:
-                    # Only one time step, delta is zero
-                    hidden_delta = torch.zeros_like(hidden_steps)  # [B, T-1, transformer_dim]
-            
-            # Concatenate hidden[t] and delta: [B, T-1, hidden_dim * 2]
-            hidden_with_delta = torch.cat([hidden_steps, hidden_delta], dim=2)  # [B, T-1, hidden_dim * 2]
+                # Use the full sequence (will be truncated/padded in judge model)
+                hidden_sequences = hidden_state[:, :-1, :]  # [B, T-1, transformer_dim]
+                full_hidden_seq = hidden_state  # [B, T, transformer_dim]
             
             # Only keep valid steps
             valid_mask = valid_steps == 1
             if valid_mask.any():
-                # Flatten valid data
-                target_valid = target_steps[valid_mask].cpu().numpy()  # [N, pred_dim]
-                label_valid = label_steps[valid_mask].cpu().numpy()  # [N]
-                hidden_valid = hidden_with_delta[valid_mask].cpu().numpy()  # [N, hidden_dim * 2]
+                # For each valid time step, use the full sequence up to that point
+                # Pad or truncate to max_len (will be handled in judge model during forward pass)
+                batch_size = hidden_sequences.shape[0]
+                seq_len = hidden_sequences.shape[1]
                 
-                if use_pred:
-                    pred_valid = pred_steps[valid_mask].cpu().numpy()  # [N, pred_dim]
-                    all_predictions.append(pred_valid)
+                target_valid_list = []
+                label_valid_list = []
+                hidden_valid_list = []
+                pred_valid_list = []
                 
-                all_targets.append(target_valid)
-                all_hidden_states.append(hidden_valid)
-                all_labels.append(label_valid)
+                for b in range(batch_size):
+                    for t in range(seq_len):
+                        if valid_mask[b, t]:
+                            # For step t, use sequence from beginning to t+1 (or last max_len steps)
+                            if isinstance(hidden_state, tuple):
+                                # LSTM: use full sequence (all same values)
+                                seq_to_use = full_hidden_seq[b].cpu().numpy()  # [max_len, hidden_dim]
+                            else:
+                                # Transformer: use sequence up to t+1, then pad/truncate
+                                seq_end = min(t + 1, full_hidden_seq.shape[1])
+                                seq_to_use = full_hidden_seq[b, :seq_end, :].cpu().numpy()  # [seq_end, hidden_dim]
+                                # Pad or truncate to max_len
+                                if seq_to_use.shape[0] < max_len:
+                                    # Pad with zeros at the beginning
+                                    pad_len = max_len - seq_to_use.shape[0]
+                                    padding = np.zeros((pad_len, seq_to_use.shape[1]), dtype=seq_to_use.dtype)
+                                    seq_to_use = np.vstack([padding, seq_to_use])  # [max_len, hidden_dim]
+                                elif seq_to_use.shape[0] > max_len:
+                                    # Truncate to last max_len steps
+                                    seq_to_use = seq_to_use[-max_len:]  # [max_len, hidden_dim]
+                            
+                            target_valid_list.append(target_steps[b, t].cpu().numpy())  # [pred_dim]
+                            label_valid_list.append(label_steps[b, t].cpu().numpy())  # scalar
+                            hidden_valid_list.append(seq_to_use)  # [max_len, hidden_dim]
+                            
+                            if use_pred:
+                                pred_valid_list.append(pred_steps[b, t].cpu().numpy())  # [pred_dim]
+                
+                if len(target_valid_list) > 0:
+                    target_valid = np.array(target_valid_list)  # [N, pred_dim]
+                    label_valid = np.array(label_valid_list)  # [N]
+                    hidden_valid = np.array(hidden_valid_list)  # [N, max_len, hidden_dim]
+                    
+                    if use_pred:
+                        pred_valid = np.array(pred_valid_list)  # [N, pred_dim]
+                        all_predictions.append(pred_valid)
+                    
+                    all_targets.append(target_valid)
+                    all_hidden_states.append(hidden_valid)
+                    all_labels.append(label_valid)
     
     # Concatenate all data
     if all_targets:
@@ -180,7 +197,7 @@ def extract_judge_training_data(sequence_model, dataloader, device, feature_name
         return None, None, None, None
 
 
-def filter_fraud_batches(dataloader, min_fraud_rate=0.1):
+def filter_fraud_batches(dataloader, min_fraud_rate=0.02):
     """
     Filter dataloader to only keep batches with fraud samples
     
@@ -368,14 +385,23 @@ def evaluate_judge_model(judge_model, test_data, device):
     
     # Convert to tensors
     test_target = torch.tensor(test_target, dtype=torch.float32).to(device)
-    test_hidden = torch.tensor(test_hidden, dtype=torch.float32).to(device)
+    test_hidden = torch.tensor(test_hidden, dtype=torch.float32).to(device)  # [N, max_len, hidden_dim]
     test_labels = torch.tensor(test_labels, dtype=torch.long).to(device)
     if test_pred is not None:
         test_pred = torch.tensor(test_pred, dtype=torch.float32).to(device)
     
+    # Debug: print shapes
+    print(f"Debug - test_hidden shape: {test_hidden.shape}")
+    print(f"Debug - test_target shape: {test_target.shape}")
+    if test_pred is not None:
+        print(f"Debug - test_pred shape: {test_pred.shape}")
+    else:
+        print(f"Debug - test_pred is None")
+    
     # Evaluate
     judge_model.eval()
     with torch.no_grad():
+        # test_hidden should be [N, max_len, hidden_dim] for CNN processing
         logits = judge_model(test_pred, test_target, test_hidden)
         probs = torch.softmax(logits, dim=1)
         pred_labels = torch.argmax(logits, dim=1)
@@ -454,7 +480,7 @@ def main():
                        help="Maximum sequence length")
     parser.add_argument("--batch_size", type=int, default=32,
                        help="Batch size for sequence model")
-    parser.add_argument("--min_fraud_rate", type=float, default=0.1,
+    parser.add_argument("--min_fraud_rate", type=float, default=0.02,
                        help="Minimum fraud rate to keep batch")
     
     # Judge model parameters
@@ -491,7 +517,7 @@ def main():
                        help="Judge model weight decay")
     parser.add_argument("--judge_batch_size", type=int, default=64,
                        help="Judge model batch size")
-    parser.add_argument("--judge_epochs", type=int, default=150,
+    parser.add_argument("--judge_epochs", type=int, default=80,
                        help="Judge model training epochs")
     
     # Learning rate scheduler parameters
@@ -535,6 +561,12 @@ def main():
     parser.add_argument("--use_pred", action="store_true",
                        help="Use predictions in addition to hidden representation (default: only use hidden representation)")
     
+    # Sliding window parameters
+    parser.add_argument("--use_sliding_window", action="store_true",
+                       help="Use sliding window to increase data volume")
+    parser.add_argument("--window_overlap", type=float, default=0.5,
+                       help="Sliding window overlap ratio (0.0-0.9)")
+    
     args = parser.parse_args()
     
     # Set device
@@ -574,7 +606,9 @@ def main():
         mode=data_mode,
         split=(args.train_ratio, args.val_ratio, args.test_ratio),
         seed=args.seed,
-        drop_all_zero_batches=False
+        drop_all_zero_batches=False,
+        use_sliding_window=getattr(args, 'use_sliding_window', False),
+        window_overlap=getattr(args, 'window_overlap', 0.5)
     )
     
     print(f"Number of batches: {len(dataloader)}")
@@ -609,7 +643,8 @@ def main():
     
     # Extract training data using sequence model
     predictions, targets, hidden_states, labels = extract_judge_training_data(
-        sequence_model, fraud_dataloader, device, feature_names, target_indices, target_names, use_pred=args.use_pred
+        sequence_model, fraud_dataloader, device, feature_names, target_indices, target_names, 
+        use_pred=args.use_pred, max_len=args.max_len
     )
     
     if targets is None:
@@ -654,6 +689,31 @@ def main():
         for key, value in vars(judge_checkpoint_args).items():
             if not hasattr(args, key) or getattr(args, key) is None:
                 setattr(args, key, value)
+        
+        # If loaded model requires predictions but we didn't extract them, re-extract with predictions
+        if getattr(judge_checkpoint_args, 'use_pred', False) and not args.use_pred:
+            print(f"Warning: Loaded model requires predictions (use_pred=True), but data was extracted with use_pred=False.")
+            print(f"Re-extracting data with use_pred=True...")
+            args.use_pred = True
+            predictions, targets, hidden_states, labels = extract_judge_training_data(
+                sequence_model, fraud_dataloader, device, feature_names, target_indices, target_names, 
+                use_pred=True, max_len=args.max_len
+            )
+            if targets is None:
+                print("No valid training data extracted after re-extraction!")
+                return
+            
+            # Recreate dataset splits with new data
+            dataset_splits = create_judge_dataset(
+                predictions, targets, hidden_states, labels,
+                args.train_ratio, args.val_ratio, args.test_ratio, args.seed
+            )
+            
+            print(f"Re-extracted dataset splits:")
+            for split_name, (pred, target, hidden, label) in dataset_splits.items():
+                if len(target) > 0:
+                    fraud_rate = np.mean(label)
+                    print(f"  {split_name}: {len(target)} samples, fraud rate: {fraud_rate:.4f}")
         # Set mode based on whether we're testing or training
         if test_only:
             judge_model.eval()
@@ -682,7 +742,10 @@ def main():
             use_statistical_features=use_statistical_features,
             use_basic_features=use_basic_features,
             hidden_dim=hidden_dim,
-            use_pred=args.use_pred
+            use_pred=args.use_pred,
+            max_len=args.max_len,  # Use the same max_len as training data extraction
+            cnn_out_channels=getattr(args, 'judge_cnn_out_channels', 64),
+            cnn_kernel_sizes=getattr(args, 'judge_cnn_kernel_sizes', [3, 5, 7])
         ).to(device)
         
         # Count and display judge model parameters

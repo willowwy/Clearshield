@@ -309,24 +309,21 @@ def infer_single_csv(csv_file, sequence_model_path, judge_model_path, max_len=50
         all_mse.append(mse)
         
         # Process hidden state for judge model
-        # For LSTM: take last layer's hidden state (delta will be zero)
-        # For Transformer: pass sequence to calculate delta = hidden[t] - hidden[t-1]
+        # New judge model uses 1D CNN, so pass full sequence [B, T, hidden_dim]
+        # Judge model will pad/truncate to max_len automatically
         if isinstance(hidden_state, tuple):
-            # LSTM: only final hidden state available, delta will be zero
+            # LSTM: only final hidden state available, will be expanded in judge model
             h_n, c_n = hidden_state
             hidden_rep = h_n[-1]  # [1, hidden_size]
+            mask_for_judge = None  # LSTM doesn't have sequence mask
         else:
-            # Transformer: [1, T, hidden_dim]
-            # Pass last 2 time steps to calculate delta, or pass sequence if available
-            if hidden_state.shape[1] >= 2:
-                # Pass last 2 time steps for delta calculation
-                hidden_rep = hidden_state[:, -2:, :]  # [1, 2, hidden_dim]
-            else:
-                # Only one time step, pass as is (delta will be zero)
-                hidden_rep = hidden_state  # [1, 1, hidden_dim]
+            # Transformer: [1, T, hidden_dim] - pass full sequence
+            hidden_rep = hidden_state  # [1, T, hidden_dim]
+            # Pass mask to help judge model handle padding
+            mask_for_judge = mask  # [1, max_len]
         
         # Judge model inference
-        fraud_prob, is_fraud = infer_judge(judge_model, step_pred_selected, target_features, device, hidden_rep)
+        fraud_prob, is_fraud = infer_judge(judge_model, step_pred_selected, target_features, device, hidden_rep, mask_for_judge)
         
         # Save results
         step_result = {

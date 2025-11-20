@@ -30,6 +30,38 @@ class MSELoss(nn.Module):
 
         return (diff ** 2).sum() / valid_count
 
+
+class MAELoss(nn.Module):
+    """Mean Absolute Error (L1) Loss with mask support.
+    
+    Args:
+        reduction: "mean" | "sum" | "none"
+    """
+    def __init__(self, reduction="mean"):
+        super().__init__()
+        self.reduction = reduction
+
+    def forward(self, preds, target, valid_mask):
+        """
+        preds: [B, T, D]
+        target: [B, T, D]
+        valid_mask: [B, T] (1 means valid step)
+        """
+        # Expand mask to match feature dimension
+        m = valid_mask.unsqueeze(-1).to(preds.dtype)  # [B,T,1]
+
+        # Compute absolute error and mask invalid steps
+        abs_diff = torch.abs(preds - target) * m  # mask invalid steps
+
+        if self.reduction == "sum":
+            return abs_diff.sum()
+
+        # count how many elements actually valid
+        valid_count = m.sum() * preds.size(-1)    # e.g. B*T*D (only for valid steps)
+        valid_count = valid_count.clamp_min(1.0)
+
+        return abs_diff.sum() / valid_count
+
 class HuberLoss(nn.Module):
     """Huber / Pseudo-Huber loss with optional column weights.
 
@@ -228,6 +260,8 @@ def build_loss_from_args(args: argparse.Namespace) -> nn.Module:
     Supported:
         - cross_entropy: Standard CrossEntropyLoss (default)
         - bce: Binary BCEWithLogitsLoss (legacy)
+        - mse: Mean Squared Error Loss
+        - mae: Mean Absolute Error (L1) Loss
         - huber: Huber
         - pseudohuber: Pseudo-Huber
         - quantile: Quantile / multi-quantile with anti-crossing
@@ -237,7 +271,7 @@ def build_loss_from_args(args: argparse.Namespace) -> nn.Module:
         - adaptive: Adaptive loss based on recall performance
         - hinge: Hinge Loss for binary classification
     Extra args:
-        --loss_type {cross_entropy,bce,huber,pseudohuber,quantile,focal,weighted,recall_focused,adaptive,hinge}
+        --loss_type {cross_entropy,bce,mse,mae,huber,pseudohuber,quantile,focal,weighted,recall_focused,adaptive,hinge}
         --delta float
         --auto_delta_p float (e.g., 0.9)
         --quantiles "0.1,0.5,0.9"
@@ -330,6 +364,9 @@ def build_loss_from_args(args: argparse.Namespace) -> nn.Module:
 
     if loss_type == "mse":
         return MSELoss(reduction="mean")
+    
+    if loss_type == "mae":
+        return MAELoss(reduction="mean")
 
     raise ValueError(f"Unknown loss_type: {loss_type}")
 

@@ -212,23 +212,72 @@ def load_judge_model(judge_model_path, device, pred_dim=None):
     final_use_pred = inferred_use_pred if inferred_use_pred is not None else getattr(args, 'use_pred', False)
     final_hidden_dim = inferred_hidden_dim if inferred_hidden_dim is not None else getattr(args, 'hidden_dim', None)
     
+    # Get CNN-related parameters from checkpoint args
+    max_len = getattr(args, 'max_len', 50)
+    cnn_out_channels = getattr(args, 'judge_cnn_out_channels', None)
+    cnn_kernel_sizes = getattr(args, 'judge_cnn_kernel_sizes', None)
+    
+    # Try to infer CNN parameters from state_dict if not in args
+    if cnn_out_channels is None or cnn_kernel_sizes is None:
+        state_dict = checkpoint.get('model_state_dict', {})
+        # Check if model has CNN layers (new architecture)
+        if 'cnn_layers.0.0.weight' in state_dict:
+            # Infer cnn_out_channels from first CNN layer
+            cnn_weight_shape = state_dict['cnn_layers.0.0.weight'].shape
+            inferred_cnn_out_channels = cnn_weight_shape[0]  # [out_channels, in_channels, kernel_size]
+            inferred_hidden_dim_from_cnn = cnn_weight_shape[1]  # This is the actual hidden_dim
+            
+            # Infer cnn_kernel_sizes by checking all CNN layers
+            inferred_kernel_sizes = []
+            layer_idx = 0
+            while f'cnn_layers.{layer_idx}.0.weight' in state_dict:
+                kernel_size = state_dict[f'cnn_layers.{layer_idx}.0.weight'].shape[2]
+                inferred_kernel_sizes.append(int(kernel_size))
+                layer_idx += 1
+            
+            if cnn_out_channels is None:
+                cnn_out_channels = inferred_cnn_out_channels
+                print(f"Inferred cnn_out_channels={cnn_out_channels} from checkpoint")
+            
+            if cnn_kernel_sizes is None:
+                cnn_kernel_sizes = inferred_kernel_sizes
+                print(f"Inferred cnn_kernel_sizes={cnn_kernel_sizes} from checkpoint")
+            
+            # Update hidden_dim if inferred from CNN (more accurate)
+            if inferred_hidden_dim_from_cnn is not None and final_hidden_dim != inferred_hidden_dim_from_cnn:
+                print(f"Warning: hidden_dim mismatch. Inferred from input_dim: {final_hidden_dim}, from CNN: {inferred_hidden_dim_from_cnn}")
+                print(f"Using hidden_dim={inferred_hidden_dim_from_cnn} from CNN weights (more accurate)")
+                final_hidden_dim = inferred_hidden_dim_from_cnn
+        else:
+            # Old model without CNN, use defaults
+            if cnn_out_channels is None:
+                cnn_out_channels = 64
+            if cnn_kernel_sizes is None:
+                cnn_kernel_sizes = [3, 5, 7]
+    
     print(f"Building judge model with:")
     print(f"  pred_dim={pred_dim}")
     print(f"  use_pred={final_use_pred}")
     print(f"  hidden_dim={final_hidden_dim}")
     print(f"  use_statistical_features={use_statistical_features}")
     print(f"  use_basic_features={use_basic_features}")
+    print(f"  max_len={max_len}")
+    print(f"  cnn_out_channels={cnn_out_channels}")
+    print(f"  cnn_kernel_sizes={cnn_kernel_sizes}")
     
     # Build judge model with same configuration as training
     judge_model = build_judge_model(
         pred_dim=pred_dim,
-        hidden_dims=getattr(args, 'judge_hidden_dims', [64, 32, 16]),
+        hidden_dims=getattr(args, 'judge_hidden_dims', [16, 8]),
         dropout=getattr(args, 'judge_dropout', 0.2),
         use_attention=getattr(args, 'judge_use_attention', False),
         use_statistical_features=use_statistical_features,
         use_basic_features=use_basic_features,
         hidden_dim=final_hidden_dim,
-        use_pred=final_use_pred
+        use_pred=final_use_pred,
+        max_len=max_len,
+        cnn_out_channels=cnn_out_channels,
+        cnn_kernel_sizes=cnn_kernel_sizes
     ).to(device)
     
     # Check if we need to adapt old model weights to new architecture (with delta)

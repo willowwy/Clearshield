@@ -161,7 +161,7 @@ def infer_sequence(sequence_model, X, mask, feature_names, device):
     return predictions, hidden_state
 
 
-def infer_judge(judge_model, predictions, targets, device, hidden_representation=None):
+def infer_judge(judge_model, predictions, targets, device, hidden_representation=None, mask=None):
     """
     Use judge model to determine if it is fraud
     
@@ -171,6 +171,9 @@ def infer_judge(judge_model, predictions, targets, device, hidden_representation
         targets: [pred_dim] Ground truth for last step
         device: Device
         hidden_representation: Hidden state from sequence model (tuple for LSTM or tensor for Transformer)
+            - For Transformer: [B, T, hidden_dim] full sequence (recommended)
+            - For LSTM: tuple (h_n, c_n) - will be expanded to sequence
+        mask: [B, T] or None, valid step markers for sequence data (optional)
     
     Returns:
         fraud_prob: Fraud probability
@@ -186,32 +189,38 @@ def infer_judge(judge_model, predictions, targets, device, hidden_representation
     if predictions is not None:
         pred_tensor = torch.tensor(predictions, dtype=torch.float32).unsqueeze(0).to(device)  # [1, pred_dim]
     
-    # Process hidden representation
-    # For delta calculation, we need to pass sequence form [B, T, hidden_dim] when available
+    # Process hidden representation for 1D CNN sequence processing
+    # New judge model uses 1D CNN to process [B, max_len, hidden_dim] sequences
     hidden_tensor = None
     if hidden_representation is not None:
         if isinstance(hidden_representation, tuple):
             # LSTM: (h_n, c_n) where h_n: [num_layers * num_directions, B, hidden_size]
-            # For LSTM, we only have final hidden state, so delta will be zero
+            # For LSTM, we only have final hidden state, will be expanded to sequence in judge model
             h_n, c_n = hidden_representation
             hidden_tensor = h_n[-1]  # [B, hidden_size] -> [1, hidden_size] for single sample
+            # Judge model will expand this to [B, max_len, hidden_size]
         elif len(hidden_representation.shape) == 3:
             # Transformer: [B, T, hidden_dim]
-            # Pass the sequence so judge model can calculate delta = hidden[t] - hidden[t-1]
-            # Take last 2 time steps to calculate delta, or just pass the sequence
-            if hidden_representation.shape[1] >= 2:
-                # Pass last 2 time steps as sequence for delta calculation
-                hidden_tensor = hidden_representation[:, -2:, :]  # [B, 2, hidden_dim]
-            else:
-                # Only one time step, pass as is (delta will be zero)
-                hidden_tensor = hidden_representation  # [B, 1, hidden_dim]
+            # Pass the full sequence - judge model will pad/truncate to max_len
+            hidden_tensor = hidden_representation  # [B, T, hidden_dim]
         else:
             # Already [B, hidden_dim] - single time step without sequence
-            # Delta will be calculated as zero in judge model
+            # Judge model will expand this to [B, max_len, hidden_dim]
             hidden_tensor = hidden_representation
     
+    # Process mask if provided
+    mask_tensor = None
+    if mask is not None:
+        if isinstance(mask, torch.Tensor):
+            mask_tensor = mask.to(device)
+        else:
+            mask_tensor = torch.tensor(mask, dtype=torch.float32).to(device)
+        # Ensure mask has batch dimension
+        if len(mask_tensor.shape) == 1:
+            mask_tensor = mask_tensor.unsqueeze(0)  # [1, T]
+    
     with torch.no_grad():
-        logits = judge_model(pred_tensor, targets, hidden_tensor)  # [1, 2]
+        logits = judge_model(pred_tensor, targets, hidden_tensor, mask_tensor)  # [1, 2]
         probs = torch.softmax(logits, dim=1)  # [1, 2]
         fraud_prob = probs[0, 1].item()  # Fraud probability
         is_fraud = torch.argmax(logits, dim=1)[0].item() == 1
@@ -322,15 +331,20 @@ def main():
     print("Judge model inference")
     print("="*60)
     # Process hidden state for judge model
-    # For LSTM: take last layer's hidden state
-    # For Transformer: take last time step
+    # New judge model uses 1D CNN, so pass full sequence [B, T, hidden_dim]
+    # Judge model will pad/truncate to max_len automatically
     if isinstance(hidden_state, tuple):
+        # LSTM: only final hidden state available, will be expanded in judge model
         h_n, c_n = hidden_state
         hidden_rep = h_n[-1]  # [1, hidden_size]
+        mask_for_judge = None  # LSTM doesn't have sequence mask
     else:
-        hidden_rep = hidden_state[:, -1, :]  # [1, hidden_dim] - last time step
+        # Transformer: [1, T, hidden_dim] - pass full sequence
+        hidden_rep = hidden_state  # [1, T, hidden_dim]
+        # Pass mask to help judge model handle padding
+        mask_for_judge = mask  # [1, max_len]
     
-    fraud_prob, is_fraud = infer_judge(judge_model, last_step_pred_selected, last_row_target, device, hidden_rep)
+    fraud_prob, is_fraud = infer_judge(judge_model, last_step_pred_selected, last_row_target, device, hidden_rep, mask_for_judge)
     
     # Output results
     print("\n" + "="*60)

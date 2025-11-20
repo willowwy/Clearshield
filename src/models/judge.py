@@ -10,8 +10,11 @@ from datetime import datetime
 
 class FraudJudgeDNN(nn.Module):
     """
-    DNN-based fraud judgment model
-    Input: comparison features between main model predictions and ground truth
+    DNN-based fraud judgment model with 1D CNN for sequence processing
+    Input: 
+        - Hidden sequence: [B, max_len, hidden_dim] processed by 1D CNN
+        - Predictions and targets: [B, pred_dim] (optional)
+        - Statistical features: [B, 6] (optional)
     Output: binary classification result (0=normal, 1=fraud)
     """
     
@@ -23,7 +26,10 @@ class FraudJudgeDNN(nn.Module):
                  use_statistical_features: bool = True,
                  use_basic_features: bool = True,
                  hidden_dim: int = None,
-                 use_pred: bool = False):
+                 use_pred: bool = False,
+                 max_len: int = 50,
+                 cnn_out_channels: int = 64,
+                 cnn_kernel_sizes: list = [3, 5, 7]):
         super().__init__()
         
         self.pred_dim = pred_dim
@@ -32,14 +38,35 @@ class FraudJudgeDNN(nn.Module):
         self.use_basic_features = use_basic_features
         self.hidden_dim = hidden_dim  # Dimension of hidden representation
         self.use_pred = use_pred  # Whether to use predictions in addition to hidden representation
+        self.max_len = max_len  # Maximum sequence length for hidden representation
+        self.cnn_out_channels = cnn_out_channels  # Store for debugging
+        self.cnn_kernel_sizes = cnn_kernel_sizes  # Store for debugging
+        
+        # Build 1D CNN for processing hidden sequence
+        cnn_features_dim = 0
+        if hidden_dim is not None:
+            self.cnn_layers = nn.ModuleList()
+            for kernel_size in cnn_kernel_sizes:
+                # Each CNN branch: Conv1d -> BatchNorm -> ReLU -> GlobalMaxPool
+                conv = nn.Conv1d(
+                    in_channels=hidden_dim,
+                    out_channels=cnn_out_channels,
+                    kernel_size=kernel_size,
+                    padding=kernel_size // 2  # Same padding
+                )
+                bn = nn.BatchNorm1d(cnn_out_channels)
+                self.cnn_layers.append(nn.Sequential(conv, bn, nn.ReLU()))
+                cnn_features_dim += cnn_out_channels  # Each branch contributes cnn_out_channels features
+        else:
+            self.cnn_layers = None
+            cnn_features_dim = 0
         
         # Calculate input dimension based on feature configuration
         input_dim = 0
         
-        # Hidden representation is always used (default) or when use_pred is False
-        # Now includes both hidden[t] and delta = hidden[t] - hidden[t-1]
+        # CNN features from hidden sequence
         if hidden_dim is not None:
-            input_dim += hidden_dim * 2  # Hidden representation + delta
+            input_dim += cnn_features_dim  # CNN output features
         
         # Predictions are used only when use_pred is True
         if use_pred and use_basic_features:
@@ -89,11 +116,17 @@ class FraudJudgeDNN(nn.Module):
         Args:
             predictions: [B, T, pred_dim] or [B, pred_dim] (optional, used only when use_pred=True)
             targets: [B, T, pred_dim] or [B, pred_dim] ground truth (required for statistical features)
-            hidden_representation: [B, hidden_dim] or [B, T, hidden_dim] or tuple for LSTM hidden state
-            mask: [B, T] or None, valid step markers for sequence data
+            hidden_representation: [B, max_len, hidden_dim] or [B, T, hidden_dim] or [B, hidden_dim] or tuple for LSTM
+                - For sequence: will be padded/truncated to max_len and processed by 1D CNN
+                - For single time step: will be expanded to [B, max_len, hidden_dim]
+                - For LSTM tuple: will use last hidden state and expand to sequence
+            mask: [B, T] or [B, max_len] or None, valid step markers for sequence data
             
         Returns:
             features: [B, feature_dim] extracted features
+                - CNN features: [B, cnn_out_channels * len(cnn_kernel_sizes)]
+                - Basic features (if enabled): [B, pred_dim * 3]
+                - Statistical features (if enabled): [B, 6]
         """
         # Determine batch size from available inputs
         if hidden_representation is not None:
@@ -112,94 +145,130 @@ class FraudJudgeDNN(nn.Module):
         
         feature_list = []
         
-        # Process hidden representation (always used when available)
-        # Now includes both hidden[t] and delta = hidden[t] - hidden[t-1]
-        if hidden_representation is not None:
+        # Process hidden representation using 1D CNN
+        # Input: [B, max_len, hidden_dim] or [B, T, hidden_dim]
+        if hidden_representation is not None and self.cnn_layers is not None:
             if isinstance(hidden_representation, tuple):
-                # LSTM hidden state: (h_n, c_n) where each is [num_layers * num_directions, B, hidden_size]
+                # LSTM hidden state: (h_n, c_n) - cannot process with CNN, use last hidden state
                 h_n, c_n = hidden_representation
-                # Take the last layer's hidden state
-                # h_n: [num_layers * num_directions, B, hidden_size]
-                # We take the last layer: h_n[-1] -> [B, hidden_size]
-                hidden_current = h_n[-1]  # [B, hidden_size]
-                # For LSTM, we don't have previous hidden state, so delta is zero
-                # This is a limitation - ideally we should pass sequence of hidden states
-                hidden_delta = torch.zeros_like(hidden_current)  # [B, hidden_size]
-                # Concatenate hidden[t] and delta
-                hidden_with_delta = torch.cat([hidden_current, hidden_delta], dim=1)  # [B, hidden_dim * 2]
+                hidden_last = h_n[-1]  # [B, hidden_size]
+                # Expand to sequence format: [B, 1, hidden_size] -> [B, max_len, hidden_size]
+                # Repeat the last hidden state to match max_len
+                hidden_seq = hidden_last.unsqueeze(1).expand(-1, self.max_len, -1)  # [B, max_len, hidden_dim]
             elif len(hidden_representation.shape) == 3:  # [B, T, hidden_dim]
-                # For sequence data, calculate delta = hidden[t] - hidden[t-1]
-                # Take the last time step as hidden[t]
-                if mask is not None:
-                    # Find the last valid time step for each sample
-                    # mask: [B, T], find last valid step index
-                    seq_len = hidden_representation.shape[1]
-                    # Create indices for last valid step
-                    last_valid_idx = (mask.cumsum(dim=1).argmax(dim=1)).clamp_max(seq_len - 1)  # [B]
-                    batch_indices = torch.arange(hidden_representation.shape[0], device=hidden_representation.device)  # [B]
-                    hidden_current = hidden_representation[batch_indices, last_valid_idx, :]  # [B, hidden_dim]
-                    
-                    # Calculate delta: hidden[t] - hidden[t-1]
-                    # For first step, delta is zero
-                    prev_idx = (last_valid_idx - 1).clamp_min(0)  # [B]
-                    hidden_prev = hidden_representation[batch_indices, prev_idx, :]  # [B, hidden_dim]
-                    # If last_valid_idx is 0, delta should be zero
-                    is_first_step = (last_valid_idx == 0).unsqueeze(-1)  # [B, 1]
-                    hidden_delta = hidden_current - hidden_prev  # [B, hidden_dim]
-                    hidden_delta = hidden_delta * (~is_first_step).float()  # Zero out delta for first step
+                # Sequence data: pad or truncate to max_len
+                seq_len = hidden_representation.shape[1]
+                if seq_len < self.max_len:
+                    # Pad with zeros at the beginning
+                    pad_len = self.max_len - seq_len
+                    padding = torch.zeros(
+                        hidden_representation.shape[0], 
+                        pad_len, 
+                        hidden_representation.shape[2],
+                        device=hidden_representation.device,
+                        dtype=hidden_representation.dtype
+                    )  # [B, pad_len, hidden_dim]
+                    hidden_seq = torch.cat([padding, hidden_representation], dim=1)  # [B, max_len, hidden_dim]
+                elif seq_len > self.max_len:
+                    # Truncate to max_len (take last max_len steps)
+                    hidden_seq = hidden_representation[:, -self.max_len:, :]  # [B, max_len, hidden_dim]
                 else:
-                    # Take last time step
-                    hidden_current = hidden_representation[:, -1, :]  # [B, hidden_dim]
-                    # Calculate delta: hidden[t] - hidden[t-1]
-                    if hidden_representation.shape[1] > 1:
-                        hidden_prev = hidden_representation[:, -2, :]  # [B, hidden_dim]
-                        hidden_delta = hidden_current - hidden_prev  # [B, hidden_dim]
-                    else:
-                        # Only one time step, delta is zero
-                        hidden_delta = torch.zeros_like(hidden_current)  # [B, hidden_dim]
-                # Concatenate hidden[t] and delta
-                hidden_with_delta = torch.cat([hidden_current, hidden_delta], dim=1)  # [B, hidden_dim * 2]
-            else:  # [B, hidden_dim] or [B, hidden_dim * 2]
-                # Check if already contains delta (from training data extraction)
-                if hidden_representation.shape[1] == self.hidden_dim * 2:
-                    # Already contains hidden[t] and delta concatenated
-                    hidden_with_delta = hidden_representation  # [B, hidden_dim * 2]
-                else:
-                    # Single time step without delta, calculate delta as zero
-                    hidden_current = hidden_representation  # [B, hidden_dim]
-                    hidden_delta = torch.zeros_like(hidden_current)  # [B, hidden_dim]
-                    # Concatenate hidden[t] and delta
-                    hidden_with_delta = torch.cat([hidden_current, hidden_delta], dim=1)  # [B, hidden_dim * 2]
+                    hidden_seq = hidden_representation  # [B, max_len, hidden_dim]
+            else:  # [B, hidden_dim] - single time step
+                # Expand to sequence format
+                hidden_seq = hidden_representation.unsqueeze(1).expand(-1, self.max_len, -1)  # [B, max_len, hidden_dim]
             
-            feature_list.append(hidden_with_delta)  # [B, hidden_dim * 2]
+            # Apply mask if provided (zero out padding positions)
+            if mask is not None:
+                # mask: [B, T] or [B, max_len]
+                if mask.shape[1] != self.max_len:
+                    # Pad or truncate mask to max_len
+                    if mask.shape[1] < self.max_len:
+                        pad_len = self.max_len - mask.shape[1]
+                        mask_padding = torch.zeros(
+                            mask.shape[0], pad_len,
+                            device=mask.device, dtype=mask.dtype
+                        )
+                        mask = torch.cat([mask_padding, mask], dim=1)
+                    else:
+                        mask = mask[:, -self.max_len:]
+                hidden_seq = hidden_seq * mask.unsqueeze(-1)  # [B, max_len, hidden_dim]
+            
+            # Apply 1D CNN: [B, max_len, hidden_dim] -> [B, hidden_dim, max_len] (transpose for Conv1d)
+            hidden_seq_transposed = hidden_seq.transpose(1, 2)  # [B, hidden_dim, max_len]
+            
+            # Process through multiple CNN branches with different kernel sizes
+            cnn_outputs = []
+            for cnn_layer in self.cnn_layers:
+                cnn_out = cnn_layer(hidden_seq_transposed)  # [B, cnn_out_channels, max_len]
+                # Global max pooling over sequence dimension
+                cnn_pooled = F.adaptive_max_pool1d(cnn_out, output_size=1).squeeze(-1)  # [B, cnn_out_channels]
+                cnn_outputs.append(cnn_pooled)
+            
+            # Concatenate outputs from all CNN branches
+            cnn_features = torch.cat(cnn_outputs, dim=1)  # [B, cnn_out_channels * len(cnn_kernel_sizes)]
+            feature_list.append(cnn_features)
         
         # Process predictions and targets (only when use_pred=True)
-        if self.use_pred and predictions is not None:
-            # Handle sequence data: if input is 3D, need aggregation
-            if len(predictions.shape) == 3:  # [B, T, pred_dim]
-                if mask is not None:
-                    # Use mask for weighted average
-                    valid_steps = mask.sum(dim=1, keepdim=True).clamp_min(1.0)  # [B, 1]
-                    pred_agg = (predictions * mask.unsqueeze(-1)).sum(dim=1) / valid_steps  # [B, pred_dim]
-                    target_agg = (targets * mask.unsqueeze(-1)).sum(dim=1) / valid_steps  # [B, pred_dim]
-                else:
-                    # Simple average
-                    pred_agg = predictions.mean(dim=1)  # [B, pred_dim]
-                    target_agg = targets.mean(dim=1)  # [B, pred_dim]
-            else:  # [B, pred_dim]
-                pred_agg = predictions
-                target_agg = targets
-            
-            # Calculate error features
-            error = pred_agg - target_agg  # [B, pred_dim]
-            
-            # Add basic features
-            if self.use_basic_features:
-                feature_list.extend([
-                    pred_agg,  # [B, pred_dim] predictions
-                    target_agg,  # [B, pred_dim] ground truth
-                    error,  # [B, pred_dim] error
-                ])
+        if self.use_pred:
+            if predictions is not None:
+                # Handle sequence data: if input is 3D, need aggregation
+                if len(predictions.shape) == 3:  # [B, T, pred_dim]
+                    if mask is not None:
+                        # Use mask for weighted average
+                        valid_steps = mask.sum(dim=1, keepdim=True).clamp_min(1.0)  # [B, 1]
+                        pred_agg = (predictions * mask.unsqueeze(-1)).sum(dim=1) / valid_steps  # [B, pred_dim]
+                        target_agg = (targets * mask.unsqueeze(-1)).sum(dim=1) / valid_steps  # [B, pred_dim]
+                    else:
+                        # Simple average
+                        pred_agg = predictions.mean(dim=1)  # [B, pred_dim]
+                        target_agg = targets.mean(dim=1)  # [B, pred_dim]
+                else:  # [B, pred_dim]
+                    pred_agg = predictions
+                    target_agg = targets
+                
+                # Calculate error features
+                error = pred_agg - target_agg  # [B, pred_dim]
+                
+                # Add basic features
+                if self.use_basic_features:
+                    feature_list.extend([
+                        pred_agg,  # [B, pred_dim] predictions
+                        target_agg,  # [B, pred_dim] ground truth
+                        error,  # [B, pred_dim] error
+                    ])
+            else:
+                # predictions is None but use_pred=True
+                # This can happen during testing when predictions weren't extracted
+                # In this case, we can't extract basic features (pred, target, error)
+                # but we can still use targets for statistical features
+                if self.use_basic_features:
+                    # If basic features are required but predictions are None, we need to handle this
+                    # Option 1: Use zeros for predictions (not ideal)
+                    # Option 2: Only use targets (but this changes feature dimension)
+                    # Option 3: Raise an error to indicate missing predictions
+                    # For now, we'll use targets as both pred and target (error will be zero)
+                    if targets is not None:
+                        if len(targets.shape) == 3:  # [B, T, pred_dim]
+                            if mask is not None:
+                                valid_steps = mask.sum(dim=1, keepdim=True).clamp_min(1.0)
+                                target_agg = (targets * mask.unsqueeze(-1)).sum(dim=1) / valid_steps
+                            else:
+                                target_agg = targets.mean(dim=1)
+                        else:
+                            target_agg = targets
+                        
+                        # Use targets as both predictions and targets (error = 0)
+                        pred_agg = target_agg  # Use target as prediction (error will be 0)
+                        error = torch.zeros_like(target_agg)  # Zero error
+                        
+                        feature_list.extend([
+                            pred_agg,  # [B, pred_dim] (using target as prediction)
+                            target_agg,  # [B, pred_dim] ground truth
+                            error,  # [B, pred_dim] (zero error)
+                        ])
+                    else:
+                        raise ValueError("When use_pred=True and use_basic_features=True, either predictions or targets must be provided")
         
         # Add statistical features if enabled (based on predictions and targets)
         if self.use_statistical_features:
@@ -292,6 +361,17 @@ class FraudJudgeDNN(nn.Module):
         """
         # Extract features
         features = self.extract_features(predictions, targets, hidden_representation, mask)
+        
+        # Debug: check feature dimension
+        if features.shape[1] != self.dnn[0].in_features:
+            raise RuntimeError(
+                f"Feature dimension mismatch: extracted features have shape {features.shape}, "
+                f"but DNN first layer expects input_dim={self.dnn[0].in_features}. "
+                f"Model config: hidden_dim={self.hidden_dim}, use_pred={self.use_pred}, "
+                f"use_basic_features={self.use_basic_features}, use_statistical_features={self.use_statistical_features}, "
+                f"max_len={self.max_len}, cnn_out_channels={getattr(self, 'cnn_out_channels', 'N/A')}, "
+                f"cnn_kernel_sizes={getattr(self, 'cnn_kernel_sizes', 'N/A')}"
+            )
         
         # Pass through DNN
         logits = self.dnn(features)
@@ -461,7 +541,10 @@ def build_judge_model(pred_dim: int, hidden_dims: list = [64, 32, 16],
                      use_statistical_features: bool = True,
                      use_basic_features: bool = True,
                      hidden_dim: int = None,
-                     use_pred: bool = False) -> FraudJudgeDNN:
+                     use_pred: bool = False,
+                     max_len: int = 50,
+                     cnn_out_channels: int = 64,
+                     cnn_kernel_sizes: list = [3, 5, 7]) -> FraudJudgeDNN:
     """Build judgment model"""
     return FraudJudgeDNN(
         pred_dim=pred_dim,
@@ -471,6 +554,9 @@ def build_judge_model(pred_dim: int, hidden_dims: list = [64, 32, 16],
         use_statistical_features=use_statistical_features,
         use_basic_features=use_basic_features,
         hidden_dim=hidden_dim,
-        use_pred=use_pred
+        use_pred=use_pred,
+        max_len=max_len,
+        cnn_out_channels=cnn_out_channels,
+        cnn_kernel_sizes=cnn_kernel_sizes
     )
 
