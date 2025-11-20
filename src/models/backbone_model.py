@@ -1,8 +1,264 @@
 import json
 import argparse
+import inspect
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+
+
+class MultiHeadAttentionPooling(nn.Module):
+    """Multi-head attention-based pooling to aggregate feature tokens into a single timestep token.
+    
+    Uses multiple attention heads to learn different feature importance patterns:
+    - Each head computes: weights_i = softmax(MLP_i(feature_tokens))
+    - Each head pools: token_i = Σ(weights_i * feature_tokens)
+    - Concatenate all heads: token = concat([token_1, token_2, ..., token_h])
+    - Project back to d_model: output = Linear(token)
+    
+    This is similar to Performer / TabNet / FT-Transformer multi-head pooling.
+    """
+    def __init__(self, d_model, num_heads=4, dropout=0.1):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+        
+        # One linear projection per head for scoring
+        self.score_proj = nn.Linear(d_model, num_heads)
+        
+        # Final projection after concatenation
+        self.output_proj = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x):
+        # x: [B, T, F, d]
+        B, T, F, d = x.shape
+        
+        # LayerNorm over last dim only
+        x = self.norm(x)  # [B, T, F, d]
+        
+        # Compute scores: [B, T, F, num_heads]
+        scores = self.score_proj(x)
+        
+        # softmax over F (features)
+        weights = torch.softmax(scores, dim=2)  # [B, T, F, num_heads]
+        weights = self.dropout(weights)
+
+        # Rearrange for pooling
+        # x: [B, T, F, d] → [B, T, F, num_heads, head_dim]
+        x_heads = x.view(B, T, F, self.num_heads, self.head_dim)
+
+        # weights: [B, T, F, num_heads] → [B, T, F, num_heads, 1]
+        weights = weights.unsqueeze(-1)
+
+        # Weighted sum over F
+        # result: [B, T, num_heads, head_dim]
+        pooled = (x_heads * weights).sum(dim=2)
+
+        # Merge heads → [B, T, d]
+        pooled = pooled.reshape(B, T, d)
+
+        return self.output_proj(pooled)
+
+
+class GatedResidualNetwork(nn.Module):
+    """Gated Residual Network (GRN) module for enhanced feature transformation.
+    
+    GRN structure:
+    - LayerNorm (at the beginning) -> x_norm
+    - Linear transformation: d_model -> d_hidden
+    - Activation (ReLU/ELU/GELU)
+    - Linear transformation: d_hidden -> d_model -> h
+    - Gating mechanism: gate = sigmoid(Wg(x_norm))  # Gate based on normalized input, NOT h
+    - Output: x_out = x_in + gate * h (residual + gated transformation)
+    """
+    def __init__(
+        self,
+        d_model: int,
+        d_hidden: int,
+        dropout: float = 0.1,
+        activation: str = 'gelu',
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.d_hidden = d_hidden
+        
+        # First linear layer: d_model -> d_hidden
+        self.linear1 = nn.Linear(d_model, d_hidden)
+        
+        # Activation function
+        if activation == 'gelu':
+            self.activation = nn.GELU()
+        elif activation == 'elu':
+            self.activation = nn.ELU()
+        elif activation == 'relu':
+            self.activation = nn.ReLU()
+        else:
+            self.activation = nn.GELU()  # default
+        
+        # Second linear layer: d_hidden -> d_model
+        self.linear2 = nn.Linear(d_hidden, d_model)
+        
+        # Gating mechanism: sigmoid gate to control information flow
+        self.gate = nn.Linear(d_model, d_model)
+        
+        # Layer normalization
+        self.norm = nn.LayerNorm(d_model)
+        
+        # Dropout
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape [B, T, d_model] or [B, T*F, d_model]
+        Returns:
+            Output tensor of same shape as input
+        """
+        x_in = x  # Store input for residual connection
+        
+        # LayerNorm at the beginning
+        x_norm = self.norm(x)
+        
+        # First transformation: d_model -> d_hidden
+        x = self.linear1(x_norm)  # [B, T, d_hidden]
+        x = self.activation(x)
+        x = self.dropout(x)
+        
+        # Second transformation: d_hidden -> d_model to get h
+        h = self.linear2(x)  # [B, T, d_model]
+        
+        # Gating mechanism: sigmoid gate based on x_norm (normalized input), NOT h
+        # Gate: g = sigmoid(Wg(x_norm)), g in [0,1]
+        gate = torch.sigmoid(self.gate(x_norm))  # [B, T, d_model]
+        
+        # Output: x_in + g * h (residual + gated transformation)
+        x_out = x_in + gate * h
+        
+        return x_out
+
+
+class GRNTransformerEncoderLayer(nn.Module):
+    """Custom Transformer Encoder Layer with GRN replacing standard FFN.
+    
+    This layer maintains the same interface as nn.TransformerEncoderLayer
+    but uses GatedResidualNetwork instead of the standard feed-forward network.
+    """
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        dim_feedforward: int,
+        dropout: float = 0.1,
+        activation: str = 'relu',
+        batch_first: bool = True,
+        norm_first: bool = False,
+        use_grn: bool = True,
+    ):
+        super().__init__()
+        self.norm_first = norm_first
+        self.use_grn = use_grn
+        
+        # Multi-head attention (same as standard Transformer)
+        self.self_attn = nn.MultiheadAttention(
+            d_model, nhead, dropout=dropout, batch_first=batch_first
+        )
+        
+        # Check if MultiheadAttention supports is_causal parameter
+        self._supports_is_causal = 'is_causal' in inspect.signature(self.self_attn.forward).parameters
+        
+        # Normalization layers
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        
+        # Dropout layers
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        
+        # Feed-forward network: use GRN if enabled, otherwise standard FFN
+        if use_grn:
+            self.grn = GatedResidualNetwork(
+                d_model=d_model,
+                d_hidden=dim_feedforward,
+                dropout=dropout,
+                activation=activation,
+            )
+            self.ffn = None
+        else:
+            # Standard FFN as fallback
+            self.ffn = nn.Sequential(
+                nn.Linear(d_model, dim_feedforward),
+                nn.ReLU() if activation == 'relu' else nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(dim_feedforward, d_model),
+                nn.Dropout(dropout),
+            )
+            self.grn = None
+    
+    def forward(
+        self,
+        src: torch.Tensor,
+        src_mask: torch.Tensor = None,
+        src_key_padding_mask: torch.Tensor = None,
+        is_causal: bool = False,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Args:
+            src: Input tensor [B, T, d_model]
+            src_mask: Attention mask (optional)
+            src_key_padding_mask: Padding mask [B, T], True for padding positions
+            is_causal: Whether to apply causal masking (for compatibility with newer PyTorch versions)
+            **kwargs: Additional arguments for compatibility with different PyTorch versions
+        Returns:
+            Output tensor [B, T, d_model]
+        """
+        x = src
+        
+        # Self-attention block
+        if self.norm_first:
+            # Pre-LN: normalize before attention
+            x_norm = self.norm1(x)
+            # Prepare attention arguments
+            attn_kwargs = {
+                'attn_mask': src_mask,
+                'key_padding_mask': src_key_padding_mask,
+            }
+            # Add is_causal if supported by this PyTorch version
+            if self._supports_is_causal and is_causal:
+                attn_kwargs['is_causal'] = is_causal
+            x_attn = self.self_attn(x_norm, x_norm, x_norm, **attn_kwargs)[0]
+            x = x + self.dropout1(x_attn)
+        else:
+            # Post-LN: normalize after attention
+            attn_kwargs = {
+                'attn_mask': src_mask,
+                'key_padding_mask': src_key_padding_mask,
+            }
+            # Add is_causal if supported by this PyTorch version
+            if self._supports_is_causal and is_causal:
+                attn_kwargs['is_causal'] = is_causal
+            x_attn = self.self_attn(x, x, x, **attn_kwargs)[0]
+            x = self.norm1(x + self.dropout1(x_attn))
+        
+        # Feed-forward block (GRN or standard FFN)
+        if self.norm_first:
+            # Pre-LN: normalize before FFN
+            x_norm = self.norm2(x)
+            if self.use_grn:
+                x_ffn = self.grn(x_norm)
+            else:
+                x_ffn = self.ffn(x_norm)
+            x = x + self.dropout2(x_ffn)
+        else:
+            # Post-LN: normalize after FFN
+            if self.use_grn:
+                x_ffn = self.grn(x)
+            else:
+                x_ffn = self.ffn(x)
+            x = self.norm2(x + self.dropout2(x_ffn))
+        
+        return x
 
 
 class TimeCatLSTM(nn.Module):
@@ -47,18 +303,20 @@ class TimeCatLSTM(nn.Module):
                     elif "Account Type" in name:
                         vocab, emb = 15, 16
                     elif "Product ID" in name:
-                        vocab, emb = 160, 16
+                        vocab, emb = 160, 32  # Match Transformer configuration
                     elif "Action Type" in name:
                         vocab, emb = 5, 5
                     elif "Source Type" in name:
-                        vocab, emb = 20, 20
+                        vocab, emb = 20, 16  # Match Transformer configuration
                     else:
                         vocab, emb = 50, 4  # Default configuration
                     
                     self.cat_embs[name] = nn.Embedding(vocab, emb)
                     cat_total_dim += emb
 
-        lstm_input_dim = time_total_dim + cat_total_dim + args.cont_dim
+        # Total input dimension after embeddings (for consistency with Transformer)
+        self.input_dim = time_total_dim + cat_total_dim + args.cont_dim
+        lstm_input_dim = self.input_dim
 
         self.lstm = nn.LSTM(
             input_size=lstm_input_dim,
@@ -72,13 +330,15 @@ class TimeCatLSTM(nn.Module):
         # Prediction head for next-step vector forecasting
         # Determine prediction dimension: prefer explicit pred_dim, otherwise use number of target_names
         inferred_pred_dim = getattr(args, 'pred_dim', 0)
+        target_names = getattr(args, 'target_names', []) or []
         if not inferred_pred_dim:
-            target_names = getattr(args, 'target_names', []) or []
             if target_names:
                 inferred_pred_dim = len(target_names)
             else:
                 inferred_pred_dim = len(getattr(args, 'feature_names', []) or [])
         self.pred_dim = inferred_pred_dim
+        # Store target_names for compatibility with train_judge.py
+        self.target_names = target_names if target_names else (getattr(args, 'feature_names', []) or [])
         self.head = nn.Linear(last_dim, self.pred_dim)
 
     def forward(
@@ -195,6 +455,7 @@ class TimeCatLSTM(nn.Module):
             raise e
 
         # Categorical embeddings - add debug information
+        c_emb = None
         if len(self.cat_embs) > 0 and categorical_features:
             # Record categorical feature information
             with open("time_features_debug.txt", "a") as f:
@@ -230,22 +491,39 @@ class TimeCatLSTM(nn.Module):
             # Apply embedding dropout
             c_emb = self.emb_dropout(c_emb)
             cont_x = torch.cat(continuous_features, dim=-1) if continuous_features else torch.zeros(x.size(0), x.size(1), 0, device=x.device, dtype=torch.float32)
-            x = torch.cat([t_emb, cont_x, c_emb], dim=-1)
+            x_emb = torch.cat([t_emb, cont_x, c_emb], dim=-1)
         else:
             cont_x = torch.cat(continuous_features, dim=-1) if continuous_features else torch.zeros(x.size(0), x.size(1), 0, device=x.device, dtype=torch.float32)
-            x = torch.cat([t_emb, cont_x], dim=-1)
+            x_emb = torch.cat([t_emb, cont_x], dim=-1)
+        
+        # Verify dimension match (for consistency with Transformer and debugging)
+        if x_emb.shape[-1] != self.input_dim:
+            raise RuntimeError(
+                f"Dimension mismatch: x_emb has shape {x_emb.shape} (last dim={x_emb.shape[-1]}), "
+                f"but LSTM expects {self.input_dim}. "
+                f"Time dim: {t_emb.shape[-1]}, Cont dim: {cont_x.shape[-1]}, "
+                f"Cat dim: {c_emb.shape[-1] if c_emb is not None else 0}, "
+                f"Cat embeddings: {list(self.cat_embs.keys())}, "
+                f"Categorical features found: {list(categorical_features.keys())}, "
+                f"Feature names: {feature_names}"
+            )
+        
+        x = x_emb
 
         if use_pack:
             lengths = mask.sum(dim=1).long().clamp_min(1)
             packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
-            packed_out, _ = self.lstm(packed)
+            packed_out, (h_n, c_n) = self.lstm(packed)
             out, _ = pad_packed_sequence(packed_out, batch_first=True, total_length=x.size(1))
+            # For packed sequences, hidden state is the last valid hidden state
+            hidden_state = (h_n, c_n)
         else:
-            out, _ = self.lstm(x)
+            out, (h_n, c_n) = self.lstm(x)
+            hidden_state = (h_n, c_n)
 
         # Time-distributed linear to produce per-step predictions [B, T, pred_dim]
         preds = self.head(out)
-        return preds
+        return preds, hidden_state
 
 
 class FraudEnc(nn.Module):
@@ -336,13 +614,15 @@ class FraudEnc(nn.Module):
         
         # Prediction head for next-step vector forecasting
         inferred_pred_dim = getattr(args, 'pred_dim', 0)
+        target_names = getattr(args, 'target_names', []) or []
         if not inferred_pred_dim:
-            target_names = getattr(args, 'target_names', []) or []
             if target_names:
                 inferred_pred_dim = len(target_names)
             else:
                 inferred_pred_dim = len(getattr(args, 'feature_names', []) or [])
         self.pred_dim = inferred_pred_dim
+        # Store target_names for compatibility with train_judge.py
+        self.target_names = target_names if target_names else (getattr(args, 'feature_names', []) or [])
         self.head = nn.Linear(transformer_dim, self.pred_dim)
         
         # Store transformer_dim for forward pass
@@ -446,15 +726,325 @@ class FraudEnc(nn.Module):
         
         # Prediction head
         preds = self.head(out)  # [B, T, pred_dim]
-        return preds
+        # Hidden state is the transformer encoder output
+        hidden_state = out  # [B, T, transformer_dim]
+        return preds, hidden_state
+
+
+class FraudFTEnc(nn.Module):
+    """Feature-level Token Encoder: each feature is an independent token."""
+    
+    def __init__(self, args: argparse.Namespace):
+        super().__init__()
+        
+        # Embedding dropout
+        self.embedding_dropout = getattr(args, 'embedding_dropout', 0.0)
+        self.emb_dropout = nn.Dropout(self.embedding_dropout) if self.embedding_dropout > 0 else nn.Identity()
+        
+        # Time embeddings (same as FraudEnc)
+        self.post_day_emb = nn.Embedding(args.day_vocab, args.day_emb_dim)
+        self.post_hour_emb = nn.Embedding(args.hour_vocab, args.hour_emb_dim)
+        self.post_min_emb = nn.Embedding(args.minute_vocab, args.minute_emb_dim)
+        self.open_day_emb = nn.Embedding(args.aod_day_vocab, args.aod_day_emb_dim)
+        
+        # Categorical embeddings (same as FraudEnc)
+        self.cat_embs = nn.ModuleDict()
+        
+        # Configure categorical embeddings based on feature names
+        if hasattr(args, 'feature_names') and args.feature_names:
+            for name in args.feature_names:
+                if name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized", "cluster_id"]:
+                    if name == "Member Age":
+                        vocab, emb = 10, 10
+                    elif name == "Amount":
+                        vocab, emb = 12, 10
+                    elif name == "is_int":
+                        vocab, emb = 2, 4
+                    elif name == "account_age_quantized":
+                        vocab, emb = 5, 5
+                    elif name == "cluster_id":
+                        vocab, emb = 60, 32
+                    elif "Account Type" in name:
+                        vocab, emb = 15, 16
+                    elif "Product ID" in name:
+                        vocab, emb = 160, 32
+                    elif "Action Type" in name:
+                        vocab, emb = 5, 5
+                    elif "Source Type" in name:
+                        vocab, emb = 20, 16
+                    else:
+                        vocab, emb = 50, 4
+                    
+                    self.cat_embs[name] = nn.Embedding(vocab, emb)
+        
+        # Transformer embedding dimension
+        transformer_dim = getattr(args, 'transformer_dim', args.lstm_hidden if hasattr(args, 'lstm_hidden') else 128)
+        
+        # Feature-level projection layers: each feature gets its own projection
+        self.time_feature_projs = nn.ModuleDict()
+        self.cat_feature_projs = nn.ModuleDict()
+        self.cont_feature_projs = nn.ModuleList()
+        
+        # Count features and create projections
+        num_features = len(getattr(args, 'feature_names', []) or [])
+        
+        if hasattr(args, 'feature_names') and args.feature_names:
+            for name in args.feature_names:
+                if name in ["Post Date_doy", "Post Time_hour", "Post Time_minute", "Account Open Date_doy"]:
+                    # Time feature: get embedding dim
+                    if name == "Post Date_doy":
+                        emb_dim = args.day_emb_dim
+                    elif name == "Post Time_hour":
+                        emb_dim = args.hour_emb_dim
+                    elif name == "Post Time_minute":
+                        emb_dim = args.minute_emb_dim
+                    elif name == "Account Open Date_doy":
+                        emb_dim = args.aod_day_emb_dim
+                    self.time_feature_projs[name] = nn.Linear(emb_dim, transformer_dim)
+                elif name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized", "cluster_id"]:
+                    # Categorical feature: get embedding dim
+                    if name in self.cat_embs:
+                        emb_dim = self.cat_embs[name].embedding_dim
+                    else:
+                        emb_dim = 4  # default
+                    self.cat_feature_projs[name] = nn.Linear(emb_dim, transformer_dim)
+                else:
+                    # Continuous feature: project from 1 dim
+                    self.cont_feature_projs.append(nn.Linear(1, transformer_dim))
+        
+        # GRN for feature-level transformation (placed at Tokenizer stage, after feature projection)
+        # This follows FT-Transformer pipeline: Feature Embedding → Feature Linear Projection → GRN
+        use_grn = getattr(args, 'use_grn', True)
+        if use_grn:
+            dim_feedforward_grn = getattr(args, 'dim_feedforward', 0)
+            if dim_feedforward_grn == 0:
+                dim_feedforward_grn = transformer_dim * 2
+            self.grn = GatedResidualNetwork(
+                d_model=transformer_dim,
+                d_hidden=dim_feedforward_grn,
+                dropout=getattr(args, 'dropout', 0.1),
+                activation=getattr(args, 'activation', 'gelu'),
+            )
+        else:
+            self.grn = None
+        
+        # Feature Transformer: self-attention within each timestep across features
+        # This does feature-wise attention for each timestep separately
+        dim_feedforward_feature = getattr(args, 'dim_feedforward', 0)
+        if dim_feedforward_feature == 0:
+            dim_feedforward_feature = transformer_dim * 2
+        
+        feature_nhead = getattr(args, 'feature_nhead', 4)  # Number of heads for feature attention
+        if transformer_dim // feature_nhead < 16:
+            feature_nhead = max(4, transformer_dim // 16)
+        
+        feature_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=transformer_dim,
+            nhead=feature_nhead,
+            dim_feedforward=dim_feedforward_feature,
+            dropout=getattr(args, 'dropout', 0.1),
+            activation=getattr(args, 'activation', 'relu'),
+            batch_first=True,
+            norm_first=getattr(args, 'norm_first', False),
+        )
+        num_feature_layers = getattr(args, 'num_feature_layers', 1)
+        self.feature_transformer = nn.TransformerEncoder(
+            feature_encoder_layer, num_layers=num_feature_layers
+        )
+        
+        # Multi-head attention pooling: aggregate F feature tokens into 1 timestep token
+        # Uses multiple heads to learn different feature importance patterns
+        pooling_num_heads = getattr(args, 'pooling_num_heads', 4)
+        self.attention_pooling = MultiHeadAttentionPooling(
+            d_model=transformer_dim,
+            num_heads=pooling_num_heads,
+            dropout=getattr(args, 'dropout', 0.1),
+        )
+        
+        # Time positional encoding
+        max_seq_len = getattr(args, 'max_seq_len', 512)
+        self.time_pos_emb = nn.Embedding(max_seq_len, transformer_dim)
+        
+        # Time Transformer: self-attention across timesteps
+        dim_feedforward_time = getattr(args, 'dim_feedforward', 0)
+        if dim_feedforward_time == 0:
+            dim_feedforward_time = transformer_dim * 2
+        
+        time_nhead = getattr(args, 'nhead', 4)  # Number of heads for time attention
+        if transformer_dim // time_nhead < 16:
+            time_nhead = max(4, transformer_dim // 16)
+        
+        time_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=transformer_dim,
+            nhead=time_nhead,
+            dim_feedforward=dim_feedforward_time,
+            dropout=getattr(args, 'dropout', 0.1),
+            activation=getattr(args, 'activation', 'relu'),
+            batch_first=True,
+            norm_first=getattr(args, 'norm_first', False),
+        )
+        num_encoder_layers = getattr(args, 'num_encoder_layers', 1)
+        self.time_transformer = nn.TransformerEncoder(time_encoder_layer, num_layers=num_encoder_layers)
+        
+        # Prediction head (same as FraudEnc)
+        inferred_pred_dim = getattr(args, 'pred_dim', 0)
+        target_names = getattr(args, 'target_names', []) or []
+        if not inferred_pred_dim:
+            if target_names:
+                inferred_pred_dim = len(target_names)
+            else:
+                inferred_pred_dim = len(getattr(args, 'feature_names', []) or [])
+        self.pred_dim = inferred_pred_dim
+        self.target_names = target_names if target_names else (getattr(args, 'feature_names', []) or [])
+        self.head = nn.Linear(transformer_dim, self.pred_dim)
+        
+        # Store transformer_dim and num_features for forward pass
+        self.transformer_dim = transformer_dim
+        self.num_features = num_features
+        
+    def forward(
+        self,
+        x: torch.Tensor,             # [B, T, total_feature_dim]
+        mask: torch.Tensor,          # [B, T]
+        feature_names: list,         # feature names list to split feature types
+        use_pack: bool = True,       # Not used for transformer, kept for compatibility
+    ) -> torch.Tensor:
+        # Separate different types of features from feature names
+        time_features = {}
+        categorical_features = {}
+        continuous_feature_indices = {}  # Map feature name to (index, feature_values)
+        feature_order = []  # Track feature order for token sequence
+        
+        for i, name in enumerate(feature_names):
+            feature_values = x[:, :, i]
+            feature_order.append(name)
+            
+            if name in ["Post Date_doy", "Post Time_hour", "Post Time_minute", "Account Open Date_doy"]:
+                time_features[name] = feature_values.long()
+            elif name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized", "cluster_id"]:
+                clamped_values = torch.clamp(feature_values, min=0).long()
+                categorical_features[name] = clamped_values
+            else:
+                continuous_feature_indices[name] = i
+        
+        # Ensure all time features are non-negative and within valid ranges
+        post_date_doy = torch.clamp(time_features["Post Date_doy"], min=0, max=365)
+        post_time_hour = torch.clamp(time_features["Post Time_hour"], min=0, max=23)
+        post_time_minute = torch.clamp(time_features["Post Time_minute"], min=0, max=59)
+        account_open_doy = torch.clamp(time_features["Account Open Date_doy"], min=0, max=365)
+        
+        # Feature-level tokenization: each feature becomes an independent token
+        feature_tokens = []
+        cont_idx = 0
+        
+        for name in feature_order:
+            if name in ["Post Date_doy", "Post Time_hour", "Post Time_minute", "Account Open Date_doy"]:
+                # Time feature: embed and project
+                if name == "Post Date_doy":
+                    emb = self.post_day_emb(post_date_doy)  # [B, T, day_emb_dim]
+                elif name == "Post Time_hour":
+                    emb = self.post_hour_emb(post_time_hour)  # [B, T, hour_emb_dim]
+                elif name == "Post Time_minute":
+                    emb = self.post_min_emb(post_time_minute)  # [B, T, minute_emb_dim]
+                elif name == "Account Open Date_doy":
+                    emb = self.open_day_emb(account_open_doy)  # [B, T, aod_day_emb_dim]
+                
+                emb = self.emb_dropout(emb.float())
+                token = self.time_feature_projs[name](emb)  # [B, T, transformer_dim]
+                feature_tokens.append(token)
+                
+            elif name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized", "cluster_id"]:
+                # Categorical feature: embed and project
+                if name in categorical_features and name in self.cat_embs:
+                    final_values = torch.clamp(categorical_features[name], min=0, max=self.cat_embs[name].num_embeddings-1)
+                    emb = self.cat_embs[name](final_values)  # [B, T, cat_emb_dim]
+                    emb = self.emb_dropout(emb.float())
+                    token = self.cat_feature_projs[name](emb)  # [B, T, transformer_dim]
+                    feature_tokens.append(token)
+                    
+            else:
+                # Continuous feature: project directly
+                feat_idx = continuous_feature_indices[name]
+                cont_feat = x[:, :, feat_idx:feat_idx+1]  # [B, T, 1]
+                token = self.cont_feature_projs[cont_idx](cont_feat)  # [B, T, transformer_dim]
+                feature_tokens.append(token)
+                cont_idx += 1
+        
+        # Step 1: Build feature tokens [B, T, F, d_model]
+        B, T, _ = feature_tokens[0].shape
+        F = len(feature_tokens)
+        
+        # Stack all feature tokens: [B, T, F, transformer_dim]
+        feature_tokens_3d = torch.stack(feature_tokens, dim=2)  # [B, T, F, transformer_dim]
+        
+        # Apply GRN at Tokenizer stage (optional, after feature projection)
+        if self.grn is not None:
+            # Reshape for GRN: [B, T, F, d] -> [B*T*F, d] -> apply GRN -> [B*T*F, d] -> [B, T, F, d]
+            B_T_F, d = feature_tokens_3d.shape[0] * feature_tokens_3d.shape[1] * feature_tokens_3d.shape[2], feature_tokens_3d.shape[3]
+            feature_tokens_flat = feature_tokens_3d.reshape(B_T_F, d)
+            feature_tokens_flat = self.grn(feature_tokens_flat)
+            feature_tokens_3d = feature_tokens_flat.reshape(B, T, F, d)
+        
+        # Step 2: Feature Transformer - self-attention within each timestep across features
+        # For each timestep t, do self-attention on F features
+        # Process each timestep separately: [B, T, F, d] -> reshape to [B*T, F, d]
+        feature_tokens_reshaped = feature_tokens_3d.reshape(B * T, F, self.transformer_dim)
+        
+        # Create feature-level mask (all features are valid within a timestep)
+        feature_mask = torch.zeros(B * T, F, dtype=torch.bool, device=feature_tokens_reshaped.device)
+        
+        # Apply feature transformer: self-attention across features for each timestep
+        feature_encoded = self.feature_transformer(
+            feature_tokens_reshaped, 
+            src_key_padding_mask=feature_mask
+        )  # [B*T, F, d_model]
+        
+        # Reshape back: [B*T, F, d] -> [B, T, F, d]
+        feature_encoded_3d = feature_encoded.reshape(B, T, F, self.transformer_dim)
+        
+        # Step 3: Attention Pooling - aggregate F feature tokens into 1 timestep token
+        # [B, T, F, d] -> [B, T, d]
+        # Multi-head pooling with LayerNorm (already inside MultiHeadAttentionPooling)
+        pooled_tokens = self.attention_pooling(feature_encoded_3d)  # [B, T, d_model]
+        
+        # Residual connection: add mean of feature tokens to prevent information loss
+        # This helps preserve information from all features, not just the pooled representation
+        # mean(feature_tokens): [B, T, F, d] -> [B, T, d]
+        feature_mean = feature_encoded_3d.mean(dim=2)  # [B, T, d_model]
+        
+        # Residual: time_token = pooled + mean(feature_tokens)
+        timestep_tokens = pooled_tokens + feature_mean  # [B, T, d_model]
+        
+        # Step 4: Add time positional encoding
+        time_positions = torch.arange(0, T, device=timestep_tokens.device).unsqueeze(0).expand(B, -1)  # [B, T]
+        time_pos_embeddings = self.time_pos_emb(time_positions)  # [B, T, d_model]
+        timestep_tokens = timestep_tokens + time_pos_embeddings  # [B, T, d_model]
+        
+        # Step 5: Time Transformer - self-attention across timesteps
+        # Create time-level mask: [B, T], True where padding
+        time_mask = (mask == 0).bool()  # [B, T], True where padding
+        
+        # Apply time transformer: self-attention across timesteps
+        encoded_sequence = self.time_transformer(
+            timestep_tokens,
+            src_key_padding_mask=time_mask
+        )  # [B, T, d_model]
+        
+        # Step 6: Prediction head for next-step reconstruction
+        preds = self.head(encoded_sequence)  # [B, T, pred_dim]
+        
+        # Hidden state for judge model: the encoded sequence
+        hidden_state = encoded_sequence  # [B, T, transformer_dim]
+        
+        return preds, hidden_state
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Time+Category Embedding LSTM (binary)")
     
     # Model type selection
-    p.add_argument("--model_type", type=str, default="transformer", choices=["lstm", "transformer", "fraudenc"], 
-                   help="Model type: lstm, transformer, or fraudenc")
+    p.add_argument("--model_type", type=str, default="lstm", choices=["lstm", "transformer", "fraudenc", "fraudftenc"], 
+                   help="Model type: lstm, transformer, fraudenc, or fraudftenc")
     
     # Continuous feature dimension (needs to match data)
     p.add_argument("--cont_dim", type=int, default=1, help="Continuous feature dimension")
@@ -480,32 +1070,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # LSTM
     p.add_argument("--lstm_hidden", type=int, default=128, help="LSTM hidden layer dimension")
-    p.add_argument("--lstm_layers", type=int, default=1, help="LSTM layer count")
+    p.add_argument("--lstm_layers", type=int, default=2, help="LSTM layer count")
     p.add_argument("--dropout", type=float, default=0.1, help="Dropout rate")
     p.add_argument("--bidirectional", action="store_true", help="Whether to use bidirectional LSTM")
     
-    # Transformer (for FraudEnc)
+    # Transformer (for FraudEnc and FraudFTEnc)
     p.add_argument("--transformer_dim", type=int, default=128, help="Transformer embedding dimension")
-    p.add_argument("--nhead", type=int, default=8, help="Number of attention heads in transformer")
-    p.add_argument("--num_encoder_layers", type=int, default=3, help="Number of transformer encoder layers")
+    p.add_argument("--nhead", type=int, default=4, help="Number of attention heads for time transformer (default: 4, ensures head_dim >= 16 for d_model=128)")
+    p.add_argument("--num_encoder_layers", type=int, default=3, help="Number of time transformer encoder layers")
+    
+    # Feature Transformer (for FraudFTEnc)
+    p.add_argument("--feature_nhead", type=int, default=4, help="Number of attention heads for feature transformer (default: 4)")
+    p.add_argument("--num_feature_layers", type=int, default=1, help="Number of feature transformer encoder layers")
+    p.add_argument("--pooling_num_heads", type=int, default=4, help="Number of heads for multi-head attention pooling (default: 4)")
     p.add_argument("--dim_feedforward", type=int, default=0, help="Feedforward dimension (0 = 2 * transformer_dim)")
     p.add_argument("--activation", type=str, default="relu", help="Activation function (relu/gelu)")
-    p.add_argument("--norm_first", action="store_true", help="Apply normalization before attention/ffn (Pre-LN)")
+    p.add_argument("--norm_first", action="store_true", default = True, help="Apply normalization before attention/ffn (Pre-LN)")
     p.add_argument("--max_seq_len", type=int, default=512, help="Maximum sequence length for positional embeddings")
+    
+    # GRN (Gated Residual Network) related parameters (for FraudFTEnc)
+    p.add_argument("--use_grn", action="store_true", default=True, help="Use Gated Residual Network in Transformer Encoder (default: True)")
+    p.add_argument("--no_use_grn", dest="use_grn", action="store_false", help="Disable GRN and use standard FFN")
 
     # Training related (optional)
     p.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
     p.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay")
-    p.add_argument("--embedding_dropout", type=float, default=0, help="Dropout rate for embeddings")
+    p.add_argument("--embedding_dropout", type=float, default=0.1, help="Dropout rate for embeddings")
     p.add_argument("--seed", type=int, default=42, help="Random seed")
     return p
 
 
-def build_model(args: argparse.Namespace):
+def build_seq_model(args: argparse.Namespace):
     """Build model based on model_type argument."""
     model_type = getattr(args, 'model_type', 'lstm').lower()
     if model_type == 'transformer' or model_type == 'fraudenc':
         return FraudEnc(args)
+    elif model_type == 'fraudftenc':
+        return FraudFTEnc(args)
     else:
         return TimeCatLSTM(args)
 
@@ -530,7 +1131,7 @@ if __name__ == "__main__":
     ]])
     
     # Build model
-    model = build_model(args)
+    model = build_seq_model(args)
     n_params = sum(p.numel() for p in model.parameters())
     print("Model built.")
     print("Total params:", n_params)
@@ -579,7 +1180,7 @@ if __name__ == "__main__":
     # Run inference
     model.eval()
     with torch.no_grad():
-        preds = model(X, mask, args.feature_names, use_pack=False)  # [B,T,pred_dim]
+        preds, hidden_state = model(X, mask, args.feature_names, use_pack=False)  # [B,T,pred_dim]
         print("Preds shape:", tuple(preds.shape))
         # Show first 3 dimensions of predictions for first two time steps
         print("Preds[0, :2, :3]:\n", preds[0, :2, :3])
