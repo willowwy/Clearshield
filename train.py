@@ -1,13 +1,15 @@
 '''
 User guide: 
 
-run
+Train from scratch:
+python train.py --save_model --epochs 110 --max_len 50 --save_dir {dir}
 
-python train.py --save_model  --epochs 110 --max_len 50 --save_model --save_dir {dir}
+Resume training from checkpoint:
+python train.py --save_model --epochs 110 --max_len 50 --save_dir {dir} --resume {checkpoint_path}
 
 after putting precessed csv files in data/precessed/
 
-then trained model will be stored in /checkpoints/best_model.pth
+then trained model will be stored in {save_dir}/best_model_enc.pth
 '''
 import os
 import argparse
@@ -27,7 +29,7 @@ import matplotlib.pyplot as plt
 import csv
 import json
 
-from src.models.backbone_model import TimeCatLSTM, build_arg_parser, build_model
+from src.models.backbone_model import TimeCatLSTM, build_arg_parser, build_seq_model
 from src.models.loss import build_loss_from_args
 from src.models.datasets import create_dataloader
 
@@ -99,9 +101,9 @@ def train_epoch(model, train_loader, optimizer, criterion, device, feature_names
             # Forward pass to get sequence predictions [B,T,pred_dim]
             if use_amp and scaler is not None:
                 with autocast():
-                    preds = model(X, mask, feature_names)
+                    preds, hidden_state = model(X, mask, feature_names)
             else:
-                preds = model(X, mask, feature_names)
+                preds, hidden_state = model(X, mask, feature_names)
             
             # Log model output info (only for first batch)
             if batch_idx == 0:
@@ -163,7 +165,7 @@ def evaluate(model, val_loader, criterion, device, feature_names, target_indices
             X, y, mask = X.to(device), y.to(device), mask.to(device)
             
             # Forward pass
-            preds = model(X, mask, feature_names)
+            preds, hidden_state = model(X, mask, feature_names)
 
             if mask.any():
                 pred_steps = preds[:, :-1, :]
@@ -196,7 +198,7 @@ def test_model(model, test_loader, criterion, device, feature_names, target_indi
             X, y, mask = X.to(device), y.to(device), mask.to(device)
             
             # Forward pass
-            preds = model(X, mask, feature_names)
+            preds, hidden_state = model(X, mask, feature_names)
 
             if mask.any():
                 pred_steps = preds[:, :-1, :]
@@ -346,7 +348,7 @@ def train_model(args):
 
     # Create model
     print("Building model...")
-    model = build_model(args).to(device)
+    model = build_seq_model(args).to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Loss function and optimizer
@@ -372,20 +374,110 @@ def train_model(args):
     best_val_loss = float('inf')
     best_auc = 0
     patience_counter = 0
+    start_epoch = 0
     
-    print("Starting training...")
-
-    # Per-epoch metrics history
-    history = {
-        'train_loss': [],
-        'train_mse': [],
-        'train_mae': [],
-        'val_loss': [],
-        'val_mse': [],
-        'val_mae': [],
-        'epoch_time': []
-    }
-    for epoch in range(args.epochs):
+    # Load checkpoint if resuming training
+    resume_path = getattr(args, 'resume', None)
+    if resume_path and os.path.exists(resume_path):
+        print(f"Loading checkpoint from: {resume_path}")
+        logger.info(f"Resuming training from checkpoint: {resume_path}")
+        
+        checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
+        
+        # Load model state
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Loaded model state from epoch {checkpoint['epoch']+1}")
+        
+        # Load optimizer state if available
+        if 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            print("Loaded optimizer state")
+        
+        # Load scaler state if available and using AMP
+        if use_amp and scaler is not None and 'scaler_state_dict' in checkpoint:
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            print("Loaded scaler state")
+        
+        # Load training state
+        start_epoch = checkpoint['epoch'] + 1
+        # Use best_val_loss if available, otherwise use val_loss
+        best_val_loss = checkpoint.get('best_val_loss', checkpoint.get('val_loss', float('inf')))
+        patience_counter = checkpoint.get('patience_counter', 0)
+        
+        print(f"Resuming from epoch {start_epoch}, best val loss: {best_val_loss:.6f}")
+        logger.info(f"Resuming from epoch {start_epoch}, best val loss: {best_val_loss:.6f}")
+        
+        # Load training history if exists
+        # Try to load from checkpoint's save_dir first, then fall back to current save_dir
+        checkpoint_args = checkpoint.get('args', None)
+        checkpoint_save_dir = None
+        if checkpoint_args:
+            if hasattr(checkpoint_args, 'save_dir'):
+                checkpoint_save_dir = checkpoint_args.save_dir
+            elif isinstance(checkpoint_args, dict) and 'save_dir' in checkpoint_args:
+                checkpoint_save_dir = checkpoint_args['save_dir']
+        
+        # Try checkpoint's save_dir, then checkpoint file's directory, then current save_dir
+        history_json_path = None
+        if checkpoint_save_dir and os.path.exists(checkpoint_save_dir):
+            history_json_path = os.path.join(checkpoint_save_dir, 'training_history.json')
+        else:
+            # Try checkpoint file's directory
+            checkpoint_dir = os.path.dirname(resume_path)
+            if checkpoint_dir:
+                potential_path = os.path.join(checkpoint_dir, 'training_history.json')
+                if os.path.exists(potential_path):
+                    history_json_path = potential_path
+        
+        if not history_json_path:
+            history_json_path = os.path.join(args.save_dir, 'training_history.json')
+        if os.path.exists(history_json_path):
+            try:
+                with open(history_json_path, 'r', encoding='utf-8') as f:
+                    history = json.load(f)
+                print(f"Loaded training history with {len(history['train_loss'])} epochs")
+                logger.info(f"Loaded training history with {len(history['train_loss'])} epochs")
+            except Exception as e:
+                print(f"Failed to load training history: {e}, starting fresh")
+                logger.warning(f"Failed to load training history: {e}, starting fresh")
+                history = {
+                    'train_loss': [],
+                    'train_mse': [],
+                    'train_mae': [],
+                    'val_loss': [],
+                    'val_mse': [],
+                    'val_mae': [],
+                    'epoch_time': []
+                }
+        else:
+            history = {
+                'train_loss': [],
+                'train_mse': [],
+                'train_mae': [],
+                'val_loss': [],
+                'val_mse': [],
+                'val_mae': [],
+                'epoch_time': []
+            }
+    else:
+        if resume_path:
+            print(f"Warning: Checkpoint path '{resume_path}' not found, starting training from scratch")
+            logger.warning(f"Checkpoint path '{resume_path}' not found, starting training from scratch")
+        
+        print("Starting training from scratch...")
+        
+        # Per-epoch metrics history
+        history = {
+            'train_loss': [],
+            'train_mse': [],
+            'train_mae': [],
+            'val_loss': [],
+            'val_mse': [],
+            'val_mae': [],
+            'epoch_time': []
+        }
+    
+    for epoch in range(start_epoch, args.epochs):
         start_time = time.time()
         
         # Training
@@ -420,14 +512,21 @@ def train_model(args):
             
             if args.save_model:
                 os.makedirs(args.save_dir, exist_ok=True)
-                torch.save({
+                checkpoint_dict = {
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'val_loss': val_loss,
                     'val_mse': val_mse,
+                    'best_val_loss': best_val_loss,
+                    'patience_counter': patience_counter,
                     'args': args
-                }, os.path.join(args.save_dir, f'best_model_enc.pth'))
+                }
+                # Save scaler state if using AMP
+                if use_amp and scaler is not None:
+                    checkpoint_dict['scaler_state_dict'] = scaler.state_dict()
+                
+                torch.save(checkpoint_dict, os.path.join(args.save_dir, f'best_model_enc.pth'))
                 print(f"Saved best model with val MSE: {val_mse:.6f}")
         else:
             patience_counter += 1
@@ -523,7 +622,7 @@ def train_model(args):
     # After training completion, use best model for test set evaluation
     if args.save_model:
         # Load best model
-        best_model_path = os.path.join(args.save_dir, 'best_model.pth')
+        best_model_path = os.path.join(args.save_dir, 'best_model_enc.pth')
         if os.path.exists(best_model_path):
             print("Loading test datasets...")
             checkpoint = torch.load(best_model_path, map_location=device, weights_only=False)
@@ -565,23 +664,23 @@ def main():
     parser = argparse.ArgumentParser(description="Train sequence model (LSTM or Transformer)")
     
     # Data related parameters
-    parser.add_argument("--data_dir", type=str, default="data/test/no_fraud", help="Data directory")
+    parser.add_argument("--data_dir", type=str, default="data/final/no_fraud", help="Data directory")
     parser.add_argument("--max_len", type=int, default=50, help="Maximum sequence length")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
-    parser.add_argument("--train_ratio", type=float, default=0.8, help="Training set ratio")
+    parser.add_argument("--batch_size", type=int, default=48, help="Batch size")
+    parser.add_argument("--train_ratio", type=float, default=0.85, help="Training set ratio")
     parser.add_argument("--val_ratio", type=float, default=0.1, help="Validation set ratio")
-    parser.add_argument("--test_ratio", type=float, default=0.1, help="Test set ratio")
+    parser.add_argument("--test_ratio", type=float, default=0.05, help="Test set ratio")
     
     # Training related parameters
-    parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
-    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
-    parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay")
+    parser.add_argument("--epochs", type=int, default=30, help="Number of training epochs")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay")
     parser.add_argument("--patience", type=int, default=5, help="Learning rate scheduler patience")
-    parser.add_argument("--early_stopping_patience", type=int, default=10, help="Early stopping patience")
+    parser.add_argument("--early_stopping_patience", type=int, default=5, help="Early stopping patience")
     parser.add_argument("--use_amp", action="store_true", help="Use mixed precision training (AMP)")
     
     # Loss options
-    parser.add_argument("--loss_type", type=str, default="mse", choices=["bce", "huber", "pseudohuber", "quantile"], help="Choose loss function")
+    parser.add_argument("--loss_type", type=str, default="mse", choices=["mse", "mae", "bce", "huber", "pseudohuber", "quantile"], help="Choose loss function")
     parser.add_argument("--delta", type=float, default=10, help="Huber/Pseudo-Huber delta (δ)")
     parser.add_argument("--auto_delta_p", type=float, default=0.9, help="Auto delta: p-quantile of residual |e|, e.g., 0.9")
     parser.add_argument("--quantiles", type=str, default="0.1,0.5,0.9", help="Quantile list, comma-separated")
@@ -591,10 +690,11 @@ def main():
     # Model saving
     parser.add_argument("--save_model", action="store_true", help="Whether to save model")
     parser.add_argument("--save_dir", type=str, default="checkpoints", help="Model save directory")
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume training from")
     
     # Sliding window parameters
     parser.add_argument("--use_sliding_window", action="store_true", help="Use sliding window to increase data volume")
-    parser.add_argument("--window_overlap", type=float, default=0.8, help="Sliding window overlap ratio (0.0-0.9)")
+    parser.add_argument("--window_overlap", type=float, default=0.5, help="Sliding window overlap ratio (0.0-0.9)")
     
     # Other parameters
     parser.add_argument("--seed", type=int, default=42, help="Random seed")

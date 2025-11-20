@@ -4,10 +4,8 @@
 eda
 .DS_Store
 
-data/raw/*
-data/processed/*
-data/external/*
-data/cleaned/*
+data/train/*
+data/pred./*
 data/
-data1/
+
 .gitignore

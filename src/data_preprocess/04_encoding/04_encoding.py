@@ -4,8 +4,8 @@ import glob
 import os
 
 # Configuration
-PROCESSED_DIR = '../../../data/processed'
-OUTPUT_DIR = '../../../data/final'
+PROCESSED_DIR = '../../../data/train/by_member'
+OUTPUT_DIR = '../../../data/train/final'
 CONFIG_PATH = '../../../config/tokenize_dict.json' #json cnofig
 CAT_FEATURES = ["Account Type", "Action Type", "Source Type", "Product ID"]
 
@@ -83,7 +83,7 @@ def encode_features(processed_dir=None, output_dir=None, config_path=None):
                 print(f"  Processed {i}/{len(csv_files)} files")
 
             try:
-                df = pd.read_csv(file)
+                df = pd.read_csv(file, dtype={'Product ID': str})
 
                 # Delete ID columns if they exist
                 for col in ["Account ID", "Member ID"]:
@@ -104,12 +104,6 @@ def encode_features(processed_dir=None, output_dir=None, config_path=None):
                 if "Post Time" in df.columns:
                     df["Post Time Parsed"] = df["Post Time"].apply(parse_post_time)
                     del df["Post Time"]
-
-                # Convert date columns
-                if "Post Date" in df.columns:
-                    df["Post Date"] = pd.to_datetime(df["Post Date"])
-                if "Account Open Date" in df.columns:
-                    df["Account Open Date"] = pd.to_datetime(df["Account Open Date"])
 
                 # Delete text columns if they exist
                 for col in ["Transaction Description", "Fraud Adjustment Indicator"]:

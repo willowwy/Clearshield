@@ -11,19 +11,28 @@ This fraud detection system combines traditional machine learning with deep lear
 ```
 ClearShield/
 ├── data/
-│   ├── train/                   # Training data pipeline (default)
+│   ├── train/                   # Training data pipeline
 │   │   ├── raw/                 # Original datasets
-│   │   ├── cleaned/             # Cleaned datasets (Step 1)
-│   │   ├── clustered_out/       # Clustered datasets (Step 2)
-│   │   ├── by_member/           # Member-grouped datasets (Step 3 intermediate)
-│   │   ├── processed/           # Fraud-matched datasets (Step 3)
+│   │   ├── cleaned/             # Cleaned datasets (Stage 1)
+│   │   ├── clustered_out/       # Clustered datasets (Stage 2)
+│   │   ├── by_member/           # Fraud-matched datasets (Stage 3)
+│   │   │   ├── temp/            # Temporary (auto-deleted)
 │   │   │   ├── matched/         # Members with matched fraud
 │   │   │   ├── unmatched/       # Members with unmatched fraud
-│   │   │   └── no_fraud/        # Members without fraud
-│   │   └── final/               # Final encoded datasets (Step 4)
+│   │   │   ├── no_fraud/        # Members without fraud
+│   │   │   └── member_summary.csv
+│   │   └── final/               # Final encoded datasets (Stage 4)
 │   │       ├── matched/         # Ready for model training
 │   │       ├── unmatched/
 │   │       └── no_fraud/
+│   │
+│   ├── pred/                    # Prediction data pipeline
+│   │   ├── raw/                 # New transaction data
+│   │   ├── cleaned/             # Cleaned (Stage 1)
+│   │   ├── clustered_out/       # Clustered (Stage 2 - inference)
+│   │   ├── by_member/           # Reorganized by member (Stage 3)
+│   │   └── final/               # Encoded for prediction (Stage 4)
+│   │
 │   └── external/                # External data sources (optional)
 │
 ├── docs/                        # Documentation files
@@ -181,3 +190,64 @@ run_stage2(
 - `--skip-fraud-matching`: Skip fraud matching stage
 - `--skip-encoding`: Skip feature encoding stage
 - `--quiet`: Suppress verbose output
+
+## 🔮 Prediction Pipeline (Inference Mode)
+
+For processing new data without retraining the clustering model:
+
+### 1. Train Mode (One-time Setup)
+First, run the training pipeline to create and save the clustering model:
+
+```bash
+cd src/data_preprocess
+python run_pipeline.py  # Saves cluster_model.pkl
+```
+
+This will save `cluster_model.pkl` containing:
+- Pre-trained PCA transformer
+- Fitted KMeans clustering model
+- BERT model configuration
+
+### 2. Inference Mode (For New Data)
+Apply the saved model to new data without retraining:
+
+**Single CSV file:**
+```bash
+cd src/data_preprocess/02_feature_engineering
+python inference_stage2.py \
+  --input /path/to/new/data.csv \
+  --output /path/to/output/data.csv \
+  --model cluster_model.pkl
+```
+
+**Entire directory:**
+```bash
+python inference_stage2.py \
+  --input /path/to/new/cleaned/ \
+  --output /path/to/new/clustered_out/ \
+  --model cluster_model.pkl
+```
+
+**Parameters:**
+- `--input`: Input CSV file or directory
+- `--output`: Output CSV file or directory
+- `--model`: Path to saved model (default: `cluster_model.pkl`)
+- `--text-column`: Column name for transaction descriptions (default: `Transaction Description`)
+- `--batch-size`: Encoding batch size (default: 512)
+- `--quiet`: Suppress progress output
+
+### 3. Complete Prediction Pipeline
+For end-to-end processing of new data:
+
+```bash
+# Step 1: Clean new data
+python run_pipeline.py --skip-feature-engineering --skip-fraud-matching --skip-encoding
+
+# Step 2: Apply clustering (inference mode)
+python 02_feature_engineering/inference_stage2.py \
+  --input ../../data/predict/cleaned \
+  --output ../../data/predict/clustered_out
+
+# Step 3: Continue with fraud matching and encoding
+python run_pipeline.py --skip-cleaning --skip-feature-engineering
+```
