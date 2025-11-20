@@ -18,7 +18,12 @@ import json
 from datetime import datetime
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    precision_recall_fscore_support,
+    roc_auc_score,
+    average_precision_score
+)
 
 from src.models.backbone_model import build_arg_parser, build_seq_model
 from src.models.datasets import create_dataloader
@@ -310,9 +315,9 @@ def train_judge_model(judge_model, train_data, val_data, device, args):
         val_pred = torch.tensor(val_pred, dtype=torch.float32).to(device)
     
     # Training loop
-    best_val_acc = 0.0
+    best_val_pr_auc = 0.0
     train_losses = []
-    val_accuracies = []
+    val_pr_aucs = []
     
     print(f"Training judge model for {args.judge_epochs} epochs...")
     
@@ -344,35 +349,44 @@ def train_judge_model(judge_model, train_data, val_data, device, args):
         # Validation
         judge_model.eval()
         val_results = trainer.evaluate(val_pred, val_target, val_labels, val_hidden)
-        val_acc = val_results['accuracy']
-        val_accuracies.append(val_acc)
+        val_probs = val_results['probabilities']
+        val_labels_np = val_labels.cpu().numpy()
+        if val_probs.shape[1] > 1:
+            positive_probs = val_probs[:, 1]
+        else:
+            positive_probs = val_probs[:, 0]
+        if len(np.unique(val_labels_np)) > 1:
+            val_pr_auc = average_precision_score(val_labels_np, positive_probs)
+        else:
+            val_pr_auc = 0.0
+        val_pr_aucs.append(val_pr_auc)
         
         # Step learning rate scheduler
         if hasattr(args, 'judge_scheduler') and args.judge_scheduler == 'plateau':
-            trainer.step_scheduler(metric=val_acc)
+            trainer.step_scheduler(metric=val_pr_auc)
         elif trainer.scheduler is not None:
             trainer.step_scheduler()
         
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+        if val_pr_auc > best_val_pr_auc:
+            best_val_pr_auc = val_pr_auc
             # Save best model
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': judge_model.state_dict(),
-                'val_accuracy': val_acc,
+                'val_pr_auc': val_pr_auc,
                 'args': args
             }, f'checkpoints-ftenc/best_judge_model.pth')
         
         if epoch % 10 == 0:
             current_lr = trainer.get_lr()
-            print(f"Epoch {epoch:3d}: Train Loss={avg_train_loss:.4f}, Val Acc={val_acc:.4f}, LR={current_lr:.6f}")
+            print(f"Epoch {epoch:3d}: Train Loss={avg_train_loss:.4f}, Val PR-AUC={val_pr_auc:.4f}, LR={current_lr:.6f}")
     
-    print(f"Best validation accuracy: {best_val_acc:.4f}")
+    print(f"Best validation PR-AUC: {best_val_pr_auc:.4f}")
     
     return {
         'train_losses': train_losses,
-        'val_accuracies': val_accuracies,
-        'best_val_acc': best_val_acc
+        'val_pr_aucs': val_pr_aucs,
+        'best_val_pr_auc': best_val_pr_auc
     }
 
 
@@ -420,23 +434,31 @@ def evaluate_judge_model(judge_model, test_data, device):
         except:
             auc = 0.5
         
+        # Calculate PR-AUC (Average Precision)
+        try:
+            pr_auc = average_precision_score(test_labels.cpu().numpy(), probs[:, 1].cpu().numpy())
+        except ValueError:
+            pr_auc = 0.0
+        
         print(f"\nJudge Model Test Results:")
         print(f"  Accuracy: {accuracy:.4f}")
         print(f"  Precision: {precision:.4f}")
         print(f"  Recall: {recall:.4f}")
         print(f"  F1-Score: {f1:.4f}")
         print(f"  AUC: {auc:.4f}")
+        print(f"  PR-AUC: {pr_auc:.4f}")
         
         return {
             'accuracy': accuracy,
             'precision': precision,
             'recall': recall,
             'f1': f1,
-            'auc': auc
+            'auc': auc,
+            'pr_auc': pr_auc
         }
 
 
-def plot_training_curves(train_losses, val_accuracies, save_dir):
+def plot_training_curves(train_losses, val_pr_aucs, save_dir):
     """Plot training curves"""
     os.makedirs(save_dir, exist_ok=True)
     
@@ -450,11 +472,11 @@ def plot_training_curves(train_losses, val_accuracies, save_dir):
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    # Validation accuracy
-    ax2.plot(val_accuracies, label='Validation Accuracy')
+    # Validation PR-AUC
+    ax2.plot(val_pr_aucs, label='Validation PR-AUC')
     ax2.set_xlabel('Epoch')
-    ax2.set_ylabel('Accuracy')
-    ax2.set_title('Judge Model Validation Accuracy')
+    ax2.set_ylabel('PR-AUC')
+    ax2.set_title('Judge Model Validation PR-AUC')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     
@@ -495,7 +517,7 @@ def main():
     parser.add_argument("--loss_type", type=str, default="focal",
                        choices=["cross_entropy", "focal", "weighted", "recall_focused", "adaptive", "hinge"],
                        help="Loss function type for recall optimization")
-    parser.add_argument("--focal_alpha", type=float, default=0.25,
+    parser.add_argument("--focal_alpha", type=float, default=0.5,
                        help="Focal loss alpha parameter")
     parser.add_argument("--focal_gamma", type=float, default=2.0,
                        help="Focal loss gamma parameter")
@@ -743,9 +765,9 @@ def main():
             use_basic_features=use_basic_features,
             hidden_dim=hidden_dim,
             use_pred=args.use_pred,
-            max_len=args.max_len,  # Use the same max_len as training data extraction
-            cnn_out_channels=getattr(args, 'judge_cnn_out_channels', 64),
-            cnn_kernel_sizes=getattr(args, 'judge_cnn_kernel_sizes', [3, 5, 7])
+            max_len=getattr(args, 'hidden_len', 10),  # Use the same max_len as training data extraction
+            cnn_out_channels=getattr(args, 'judge_cnn_out_channels', 32),
+            cnn_kernel_sizes=getattr(args, 'judge_cnn_kernel_sizes', [3, 5, 8])
         ).to(device)
         
         # Count and display judge model parameters
@@ -802,7 +824,7 @@ def main():
     # Plot training curves
     plot_training_curves(
         training_results['train_losses'],
-        training_results['val_accuracies'],
+        training_results['val_pr_aucs'],
         args.save_dir
     )
     
