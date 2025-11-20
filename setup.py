@@ -20,13 +20,72 @@ def check_python_version():
 
 
 def create_directories():
-    """Create necessary data directories"""
-    directories = ['data/raw']
-
+    """Create necessary data directories using centralized config"""
     print("Creating project directories...")
-    for directory in directories:
+
+    # Import centralized configuration
+    try:
+        from config.pipeline_config import get_train_config, get_pred_config
+
+        # Create training directories
+        print("\n  Training Pipeline Directories:")
+        train_config = get_train_config()
+        train_config.create_directories(verbose=False)
+
+        # Print created training directories
+        for key, path in train_config.paths.items():
+            if 'train' in str(path):
+                print(f"    ✓ {path.relative_to(train_config.PROJECT_ROOT)}")
+
+        # Create prediction directories
+        print("\n  Prediction Pipeline Directories:")
+        pred_config = get_pred_config()
+        pred_config.create_directories(verbose=False)
+
+        # Print created prediction directories
+        for key, path in pred_config.paths.items():
+            if 'pred' in str(path):
+                print(f"    ✓ {path.relative_to(pred_config.PROJECT_ROOT)}")
+
+    except ImportError as e:
+        print(f"  ⚠ Warning: Could not import pipeline_config: {e}")
+        print("  Creating basic directory structure instead...")
+
+        # Fallback: create basic directory structure
+        basic_dirs = [
+            'data/train/raw',
+            'data/train/cleaned',
+            'data/train/clustered_out',
+            'data/train/by_member/temp',
+            'data/train/by_member/matched',
+            'data/train/by_member/unmatched',
+            'data/train/by_member/no_fraud',
+            'data/train/final/matched',
+            'data/train/final/unmatched',
+            'data/train/final/no_fraud',
+            'data/pred/raw',
+            'data/pred/cleaned',
+            'data/pred/clustered_out',
+            'data/pred/by_member',
+            'data/pred/final',
+        ]
+
+        for directory in basic_dirs:
+            Path(directory).mkdir(parents=True, exist_ok=True)
+            print(f"    ✓ {directory}")
+
+    # Create additional project directories
+    print("\n  Additional Directories:")
+    additional_dirs = [
+        'notebooks',
+        'docs',
+        'config',
+        'src/data_preprocess/02_feature_engineering/02b_description_encoding',
+    ]
+
+    for directory in additional_dirs:
         Path(directory).mkdir(parents=True, exist_ok=True)
-        print(f"  ✓ {directory}")
+        print(f"    ✓ {directory}")
 
     print("\n✓ All directories created successfully!\n")
 
@@ -60,8 +119,13 @@ def main():
     print("Setup Complete!")
     print("=" * 60)
     print("\nNext steps:")
-    print("1. Place your raw CSV files in data/raw/")
-    print("2. Open src/data_preprocess/pipeline.ipynb to run preprocessing")
+    print("1. Place your training data in data/train/raw/")
+    print("2. For training: run 'python src/data_preprocess/run_train_pipeline.py'")
+    print("   Or use: src/data_preprocess/train_pipeline.ipynb")
+    print("\n3. Place your prediction data in data/pred/raw/")
+    print("4. For prediction: run 'python src/data_preprocess/run_pred_pipeline.py'")
+    print("   Or use: src/data_preprocess/pred_pipeline.ipynb")
+    print("\nFor more details, see README.md")
     print()
 
 
