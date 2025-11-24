@@ -38,9 +38,6 @@ def encode_features(processed_dir=None, output_dir=None, config_path=None):
     if config_path is None:
         config_path = CONFIG_PATH
 
-    print("=" * 60)
-    print("FEATURE ENCODING")
-    print("=" * 60)
     print(f"Input Dir: {processed_dir}")
     print(f"Output Dir: {output_dir}")
     print(f"Config Path: {config_path}\n")

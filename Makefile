@@ -14,18 +14,17 @@ help:
 	@echo "  make setup          - Initialize project (create dirs + install deps)"
 	@echo "  make install        - Install Python dependencies"
 	@echo ""
-	@echo "Pipeline Commands:"
-	@echo "  make run-train      - Run training data pipeline (Stage 1-4)"
-	@echo "  make run-pred       - Run prediction data pipeline (Stage 1-4, inference)"
+	@echo "Training Pipeline:"
+	@echo "  make run-train      - Run training pipeline (Stage 1-5)"
+	@echo "  make clean-train    - Clean training data + scan results"
+	@echo ""
+	@echo "Prediction Pipeline:"
+	@echo "  make run-pred       - Run prediction pipeline (Stage 1-4)"
+	@echo "  make clean-pred     - Clean prediction data"
+	@echo ""
+	@echo "General Commands:"
 	@echo "  make run            - Alias for 'make run-train'"
-	@echo ""
-	@echo "Cleaning Commands:"
-	@echo "  make clean-train    - Clean training data directories"
-	@echo "  make clean-pred     - Clean prediction data directories"
-	@echo "  make clean-all      - Clean both training and prediction directories"
-	@echo "  make clean          - Alias for 'make clean-all'"
-	@echo ""
-	@echo "Other Commands:"
+	@echo "  make clean          - Clean all data directories"
 	@echo "  make help           - Show this help message"
 	@echo "======================================================================"
 
@@ -68,6 +67,7 @@ clean-train:
 	@rm -rf data/train/clustered_out/*
 	@rm -rf data/train/by_member/*
 	@rm -rf data/train/final/*
+	@rm -f vulnerability_scan_results.json
 	@echo "✓ Training data cleaned"
 
 clean-pred:

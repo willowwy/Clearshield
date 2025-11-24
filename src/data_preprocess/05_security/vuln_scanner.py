@@ -1919,10 +1919,143 @@ class ClearShieldTestSuite:
 
     def export_results(self, json_path: str):
         """Export test results to JSON file"""
+        import numpy as np
+
+        def convert_to_json_serializable(obj):
+            """Convert numpy types to Python native types for JSON serialization"""
+            if isinstance(obj, dict):
+                return {k: convert_to_json_serializable(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_to_json_serializable(item) for item in obj]
+            elif isinstance(obj, tuple):
+                return tuple(convert_to_json_serializable(item) for item in obj)
+            elif isinstance(obj, (np.integer, np.int64, np.int32)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, np.float64, np.float32)):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            else:
+                return obj
+
         summary = self.generate_summary()
+        summary = convert_to_json_serializable(summary)
+
         with open(json_path, 'w') as f:
             json.dump(summary, f, indent=2)
         print(f"\nTest results exported to: {json_path}")
+
+
+# ============================================================================
+# MAIN FUNCTION FOR EXTERNAL CALLING
+# ============================================================================
+
+def run_vulnerability_scan(final_data_path: str = "../../data/train/final",
+                           data_file_pattern: str = "*.csv",
+                           data_sample_size: Optional[int] = 1000,
+                           export_path: Optional[str] = None,
+                           verbose: bool = True,
+                           **kwargs) -> Dict[str, Any]:
+    """
+    Run vulnerability scanning on the final processed data.
+
+    This function can be called from Jupyter notebooks or other Python scripts.
+
+    Args:
+        final_data_path: Path to the final data directory
+        data_file_pattern: Pattern to match files (e.g., "*.csv")
+        data_sample_size: Optional sample size for testing
+        export_path: Optional path to export results JSON
+        verbose: Whether to print detailed output
+        **kwargs: Additional TestSuiteConfig parameters
+
+    Returns:
+        Dictionary containing test results and summary
+
+    Example:
+        >>> from vuln_scanner import run_vulnerability_scan
+        >>> results = run_vulnerability_scan(
+        ...     final_data_path="../../data/train/final",
+        ...     data_sample_size=500
+        ... )
+    """
+    print("=" * 70)
+    print("CLEARSHIELD VULNERABILITY SCANNER")
+    print("=" * 70)
+    print(f"Data path: {final_data_path}")
+    print(f"Sample size: {data_sample_size}")
+    print("=" * 70)
+
+    # Example: Create a Transformer Encoder model for fraud detection
+    class FraudDetectionTransformer(nn.Module):
+        def __init__(self, input_size=20, model_dim=64, num_heads=4, num_layers=2, dropout=0.1):
+            super().__init__()
+            # Project raw features into model dimension
+            self.input_proj = nn.Linear(input_size, model_dim)
+
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=model_dim,
+                nhead=num_heads,
+                dropout=dropout,
+                batch_first=True
+            )
+
+            self.transformer = nn.TransformerEncoder(
+                encoder_layer,
+                num_layers=num_layers
+            )
+
+            self.fc = nn.Linear(model_dim, 1)
+            self.sigmoid = nn.Sigmoid()
+
+        def forward(self, x):
+            # x: (batch, seq, features)
+            x = self.input_proj(x)
+            encoded = self.transformer(x)       # (batch, seq, model_dim)
+            last_output = encoded[:, -1, :]     # use last time step
+            output = self.fc(last_output)
+            return self.sigmoid(output)
+
+    # Create model
+    model = FraudDetectionTransformer(
+        input_size=20, model_dim=64, num_heads=4, num_layers=2)
+
+    # Configure test suite
+    config = TestSuiteConfig(
+        final_data_path=final_data_path,
+        data_file_pattern=data_file_pattern,
+        data_sample_size=data_sample_size,
+        verbose=verbose,
+        **kwargs
+    )
+
+    # Create test suite with automatic data loading
+    test_suite = ClearShieldTestSuite(
+        model,
+        config=config,
+        auto_load_data=True
+    )
+
+    # Run all tests
+    print("\nRunning vulnerability tests...\n")
+    results = test_suite.run_all_tests()
+
+    # Print report
+    test_suite.print_report()
+
+    # Export results if path provided
+    if export_path:
+        test_suite.export_results(export_path)
+        print(f"\nResults exported to: {export_path}")
+
+    # Generate summary
+    summary = test_suite.generate_summary()
+
+    print("\n" + "=" * 70)
+    print("VULNERABILITY SCAN COMPLETED")
+    print("=" * 70)
+
+    return summary
 
 
 # ============================================================================
