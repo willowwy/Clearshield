@@ -1,0 +1,253 @@
+# ClearShield Vulnerability Scanner - Configuration & Usage
+
+## Prerequisites
+
+```bash
+python >= 3.8
+torch
+numpy
+pandas
+scikit-learn
+```
+
+## Installation
+
+```bash
+# Clone repository
+git clone <repository-url>
+cd Clearshield
+
+# Install dependencies
+pip install torch numpy pandas scikit-learn
+```
+
+## Project Structure
+
+```
+Clearshield/
+├── src/
+│   └── data_preprocess/
+│       └── 05_security/
+│           └── vuln_scanner.py
+├── data/
+│   └── train/
+│       └── final/
+│           ├── matched/
+│           ├── no_fraud/
+│           └── unmatched/
+└── test_results.json (generated after run)
+```
+
+## Configuration
+
+### Step 1: Configure Model Input Size
+
+Count your numeric features (excluding labels, IDs, timestamps, PII):
+
+```python
+# Example CSV columns:
+# Amount, cluster_id, Account Type_enc, Action Type_enc, 
+# Source Type_enc, Product ID_enc
+# Total: 6 numeric features
+```
+
+Edit `vuln_scanner.py` line ~1980:
+
+```python
+model = FraudDetectionTransformer(
+    input_size=6,  # Update to match your feature count
+    model_dim=64, 
+    num_heads=4, 
+    num_layers=2
+)
+```
+
+### Step 2: Configure Test Parameters
+
+Edit `vuln_scanner.py` line ~1983:
+
+```python
+config = TestSuiteConfig(
+    final_data_path="data/train/final",  # Path to your data
+    data_file_pattern="*.csv",            # File extension
+    data_sample_size=1000,                # Number of samples (None for all)
+    verbose=True
+)
+config.Transformer.expected_input_size = 6  # Must match model input_size
+```
+
+### Step 3: Configure Column Names
+
+Edit `vuln_scanner.py` line ~260 to match your CSV columns:
+
+```python
+@dataclass
+class DataPreprocessingConfig:
+    required_columns: List[str] = field(
+        default_factory=lambda: ['Post Date', 'Amount', 'Fraud'])
+    key_columns_for_duplicates: List[str] = field(
+        default_factory=lambda: ['Post Date', 'Member Age', 'Amount'])
+    user_id_column: str = 'Member Age'
+    fraud_column: str = 'Fraud'  # Update to match your fraud column name
+```
+
+## Running the Scanner
+
+### Basic Usage
+
+```bash
+cd Clearshield
+python3 src/data_preprocess/05_security/vuln_scanner.py
+```
+
+### Quick Test (Small Sample)
+
+```python
+# Edit line ~1983
+config = TestSuiteConfig(
+    data_sample_size=500,
+    verbose=False
+)
+```
+
+### Full Scan (All Data)
+
+```python
+# Edit line ~1983
+config = TestSuiteConfig(
+    data_sample_size=None,  # Use all data
+    verbose=True
+)
+```
+
+### Selective Testing
+
+```python
+# Edit line ~1983
+config = TestSuiteConfig(
+    enable_preprocessing_tests=True,
+    enable_clustering_tests=False,      # Skip to save time
+    enable_Transformer_tests=True,
+    enable_performance_tests=False,     # Skip to save time
+    enable_security_tests=True
+)
+```
+
+## Configuration Options
+
+### Test Suite Settings
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `final_data_path` | `"data/train/final"` | Path to data directory |
+| `data_file_pattern` | `"*.csv"` | File pattern to match |
+| `data_sample_size` | `1000` | Sample size (`None` = all data) |
+| `verbose` | `True` | Show detailed output |
+
+### Model Settings
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `input_size` | `20` | Number of input features |
+| `model_dim` | `64` | Transformer hidden dimension |
+| `num_heads` | `4` | Number of attention heads |
+| `num_layers` | `2` | Number of transformer layers |
+
+### Performance Settings
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `p99_threshold_ms` | `250.0` | Max P99 latency (ms) |
+| `latency_test_iterations` | `100` | Number of test runs |
+
+### Test Modules
+
+| Module | Default | Description |
+|--------|---------|-------------|
+| `enable_preprocessing_tests` | `True` | Data quality tests |
+| `enable_clustering_tests` | `True` | K-Means clustering tests |
+| `enable_Transformer_tests` | `True` | Model architecture tests |
+| `enable_performance_tests` | `True` | Latency/throughput tests |
+| `enable_security_tests` | `True` | Security vulnerability tests |
+
+## Output Files
+
+### Console Output
+Real-time test progress and results are displayed in the terminal.
+
+### JSON Output
+```bash
+test_results.json  # Detailed results in JSON format
+```
+
+## Example Configuration
+
+### Development (Fast Testing)
+
+```python
+model = FraudDetectionTransformer(input_size=6, model_dim=64, num_heads=4, num_layers=2)
+
+config = TestSuiteConfig(
+    final_data_path="data/train/final",
+    data_sample_size=500,
+    verbose=False,
+    enable_clustering_tests=False,
+    enable_performance_tests=False
+)
+config.Transformer.expected_input_size = 6
+```
+
+### Production (Comprehensive)
+
+```python
+model = FraudDetectionTransformer(input_size=6, model_dim=64, num_heads=4, num_layers=2)
+
+config = TestSuiteConfig(
+    final_data_path="data/train/final",
+    data_sample_size=None,
+    verbose=True,
+    enable_preprocessing_tests=True,
+    enable_clustering_tests=True,
+    enable_Transformer_tests=True,
+    enable_performance_tests=True,
+    enable_security_tests=True
+)
+config.Transformer.expected_input_size = 6
+```
+
+## Using JSON Configuration (Optional)
+
+Create `vuln_scanner_config.json`:
+
+```json
+{
+  "preprocessing": {
+    "required_columns": ["Post Date", "Amount", "Fraud"],
+    "fraud_column": "Fraud"
+  },
+  "Transformer": {
+    "expected_input_size": 6
+  },
+  "final_data_path": "data/train/final",
+  "data_sample_size": 1000
+}
+```
+
+Load in code (line ~1983):
+
+```python
+config = TestSuiteConfig.from_json('src/data_preprocess/05_security/vuln_scanner_config.json')
+```
+
+## Quick Reference
+
+```bash
+# Install dependencies
+pip install torch numpy pandas scikit-learn
+
+# Run with defaults
+python3 ./src/data_preprocess/05_security/vuln_scanner.py
+
+# View results
+cat test_results.json
+```
