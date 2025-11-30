@@ -8,4 +8,6 @@ data/train/*
 data/pred./*
 data/
 
-.gitignore
+# Vulnerability scan results
+vulnerability_scan_results.json
+*_scan_results.json
