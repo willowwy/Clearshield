@@ -48,8 +48,11 @@ ClearShield/
 │   │   │   └── 02_feature_engineering.py        # Main pipeline
 │   │   ├── 03_fraud_relabeling/     # Step 3: Fraud matching and re-labeling
 │   │   ├── 04_encoding/             # Step 4: Feature encoding
-│   │   ├── 05_vulnerability_scanner/ # Security protection
-│   │   └── pipeline.ipynb           # Complete preprocessing pipeline
+│   │   ├── 05_security/             # Step 5: Vulnerability scanning & encryption
+│   │   ├── train_pipeline.ipynb     # Training pipeline notebook
+│   │   ├── pred_pipeline.ipynb      # Prediction pipeline notebook
+│   │   ├── run_train_pipeline.py    # Automated training pipeline
+│   │   └── run_pred_pipeline.py     # Automated prediction pipeline
 │   │
 │   └── models/
 │       ├── preprocessing/           # Model-specific preprocessing
@@ -69,7 +72,7 @@ ClearShield/
 
 ## 🔄 Data Processing Pipeline
 
-The preprocessing pipeline consists of 4 sequential stages:
+The preprocessing pipeline consists of 5 sequential stages:
 
 ### Step 1: Data Cleaning (`01_data_cleaning`)
 - Standardize CSV headers
@@ -109,7 +112,18 @@ The preprocessing pipeline consists of 4 sequential stages:
 
 **Data Flow**: `train/processed/` → `train/final/[matched|unmatched|no_fraud]/`
 
-**Final Output**: `data/train/final/` contains model-ready datasets
+### Step 5: Vulnerability Scanning (`05_security`) - Optional
+- **Security Testing**: Runs comprehensive vulnerability scans on processed data
+- **Data Poisoning Detection**: Tests model robustness against adversarial inputs
+- **Model Attack Simulation**: FGSM, PGD, and boundary attacks
+- **Privacy Testing**: Membership inference and attribute inference attacks
+- **Encryption Support**: Provides data encryption handlers for secure storage
+- **Automated Reporting**: Generates detailed JSON reports with security metrics
+
+**Input**: `data/train/final/` (model-ready datasets)
+**Output**: `vulnerability_scan_results.json` (security report)
+
+**Final Output**: `data/train/final/` contains model-ready, security-tested datasets
 
 ## 🚀 Quick Start
 
@@ -138,24 +152,21 @@ make setup
 **Option A: Automated Script (Recommended)**
 ```bash
 cd src/data_preprocess
-python run_pipeline.py
-```
-
-Or using Makefile:
-```bash
-make run
+python run_train_pipeline.py
 ```
 
 Advanced usage:
 ```bash
-python run_pipeline.py --help                    # Show all options
-python run_pipeline.py --skip-cleaning           # Skip data cleaning
-python run_pipeline.py --min-history 15          # Set minimum history to 15
+python run_train_pipeline.py --help                    # Show all options
+python run_train_pipeline.py --skip-cleaning           # Skip data cleaning
+python run_train_pipeline.py --min-history 15          # Set minimum history to 15
+python run_train_pipeline.py --skip-vuln-scan          # Skip vulnerability scanning
+python run_train_pipeline.py --vuln-sample-size 2000   # Use 2000 samples for scanning
 ```
 
 **Option B: Jupyter Notebook (For exploration)**
-- Open `src/data_preprocess/pipeline.ipynb`
-- Execute cells sequentially to run the complete 4-stage pipeline
+- Open `src/data_preprocess/train_pipeline.ipynb`
+- Execute cells sequentially to run the complete 5-stage pipeline
 
 **Final datasets** will be in `data/train/final/[matched|unmatched|no_fraud]/`
 
@@ -184,12 +195,19 @@ run_stage2(
 ```
 
 ### Pipeline Parameters
+
+**Training Pipeline (`run_train_pipeline.py`):**
 - `--min-history N`: Minimum transaction count per member (default: 10)
 - `--skip-cleaning`: Skip data cleaning stage
 - `--skip-feature-engineering`: Skip feature engineering stage
 - `--skip-fraud-matching`: Skip fraud matching stage
 - `--skip-encoding`: Skip feature encoding stage
-- `--quiet`: Suppress verbose output
+- `--skip-vuln-scan`: Skip vulnerability scanning stage
+- `--vuln-sample-size N`: Number of samples for vulnerability scanning (default: 1000)
+
+**Prediction Pipeline (`run_pred_pipeline.py`):**
+- Similar parameters as training pipeline
+- Optimized for inference mode (uses pre-trained models)
 
 ## 🔮 Prediction Pipeline (Inference Mode)
 
@@ -200,7 +218,7 @@ First, run the training pipeline to create and save the clustering model:
 
 ```bash
 cd src/data_preprocess
-python run_pipeline.py  # Saves cluster_model.pkl
+python run_train_pipeline.py  # Saves cluster_model.pkl
 ```
 
 This will save `cluster_model.pkl` containing:
@@ -240,14 +258,19 @@ python inference_stage2.py \
 For end-to-end processing of new data:
 
 ```bash
+# Use the automated prediction pipeline
+cd src/data_preprocess
+python run_pred_pipeline.py
+
+# Or run steps manually:
 # Step 1: Clean new data
-python run_pipeline.py --skip-feature-engineering --skip-fraud-matching --skip-encoding
+python run_pred_pipeline.py --skip-feature-engineering --skip-fraud-matching --skip-encoding
 
 # Step 2: Apply clustering (inference mode)
 python 02_feature_engineering/inference_stage2.py \
-  --input ../../data/predict/cleaned \
-  --output ../../data/predict/clustered_out
+  --input ../../data/pred/cleaned \
+  --output ../../data/pred/clustered_out
 
 # Step 3: Continue with fraud matching and encoding
-python run_pipeline.py --skip-cleaning --skip-feature-engineering
+python run_pred_pipeline.py --skip-cleaning --skip-feature-engineering
 ```
