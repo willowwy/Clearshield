@@ -49,15 +49,17 @@ class PipelineConfig:
             'final': mode_root / 'final',
         }
 
-        # Mode-specific paths
+        # Mode-specific paths (build sub-paths based on parent paths)
         if self.mode == 'train':
-            self.paths['by_member_temp'] = mode_root / 'by_member' / 'temp'
-            self.paths['by_member_matched'] = mode_root / 'by_member' / 'matched'
-            self.paths['by_member_unmatched'] = mode_root / 'by_member' / 'unmatched'
-            self.paths['by_member_no_fraud'] = mode_root / 'by_member' / 'no_fraud'
-            self.paths['final_matched'] = mode_root / 'final' / 'matched'
-            self.paths['final_unmatched'] = mode_root / 'final' / 'unmatched'
-            self.paths['final_no_fraud'] = mode_root / 'final' / 'no_fraud'
+            # by_member subdirectories
+            self.paths['by_member_temp'] = self.paths['by_member'] / 'temp'
+            self.paths['by_member_matched'] = self.paths['by_member'] / 'matched'
+            self.paths['by_member_unmatched'] = self.paths['by_member'] / 'unmatched'
+            self.paths['by_member_no_fraud'] = self.paths['by_member'] / 'no_fraud'
+            # final subdirectories
+            self.paths['final_matched'] = self.paths['final'] / 'matched'
+            self.paths['final_unmatched'] = self.paths['final'] / 'unmatched'
+            self.paths['final_no_fraud'] = self.paths['final'] / 'no_fraud'
 
         # Model and config paths (shared between train and pred)
         self.paths['model_dir'] = (
