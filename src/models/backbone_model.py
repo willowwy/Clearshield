@@ -1043,7 +1043,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Time+Category Embedding LSTM (binary)")
     
     # Model type selection
-    p.add_argument("--model_type", type=str, default="lstm", choices=["lstm", "transformer", "fraudenc", "fraudftenc"], 
+    p.add_argument("--model_type", type=str, default="fraudftenc", choices=["lstm", "transformer", "fraudenc", "fraudftenc"], 
                    help="Model type: lstm, transformer, fraudenc, or fraudftenc")
     
     # Continuous feature dimension (needs to match data)

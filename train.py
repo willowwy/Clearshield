@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 import csv
 import json
 
-from src.models.backbone_model import TimeCatLSTM, build_arg_parser, build_seq_model
+from src.models.backbone_model import build_arg_parser, build_seq_model
 from src.models.loss import build_loss_from_args
 from src.models.datasets import create_dataloader
 
@@ -664,7 +664,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train sequence model (LSTM or Transformer)")
     
     # Data related parameters
-    parser.add_argument("--data_dir", type=str, default="data/final/no_fraud", help="Data directory")
+    parser.add_argument("--data_dir", type=str, default="data/test/no_fraud", help="Data directory")
     parser.add_argument("--max_len", type=int, default=50, help="Maximum sequence length")
     parser.add_argument("--batch_size", type=int, default=48, help="Batch size")
     parser.add_argument("--train_ratio", type=float, default=0.85, help="Training set ratio")
