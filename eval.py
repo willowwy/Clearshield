@@ -26,6 +26,7 @@ from sklearn.metrics import (
     accuracy_score, precision_recall_fscore_support, 
     roc_auc_score, confusion_matrix, classification_report
 )
+from sklearn.cluster import KMeans
 
 from src.models.backbone_model import build_arg_parser, build_seq_model
 from src.models.datasets import create_dataloader
@@ -541,6 +542,83 @@ def visualize_cat_embeddings(model, json_path, save_dir, features=None, max_toke
         print(f"Saved: {save_path}")
 
 
+def visualize_all_embeddings(model, json_path, save_dir, max_tokens_per_feature=50):
+    """Visualize cosine heatmaps for *all* embedding layers in model.cat_embs.
+
+    This includes:
+    - Encoded categorical features (e.g. "*_enc")
+    - Quantized / discretized numeric features (e.g. "Amount", "account_age_quantized")
+    - Special categorical features (e.g. "is_int", "Member Age", "cluster_id")
+
+    Clustering is NOT performed here; we only draw plain cosine similarity heatmaps.
+    """
+    # Try to load tokenize dict for human-readable labels; fall back to index labels if missing.
+    try:
+        tok_dict = _load_tokenize_dict(json_path)
+    except Exception as e:
+        print(f"Failed to load tokenize dict from {json_path}: {e}")
+        tok_dict = {}
+
+    if not hasattr(model, 'cat_embs') or model.cat_embs is None or len(model.cat_embs) == 0:
+        print("Model has no categorical / quantized embeddings to visualize.")
+        return
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    for emb_name, emb_layer in model.cat_embs.items():
+        vocab_size = emb_layer.num_embeddings
+        if vocab_size == 0:
+            print(f"Skip: empty embedding layer {emb_name}")
+            continue
+
+        emb_weight = emb_layer.weight.detach().cpu().numpy()
+
+        # Derive base feature name, e.g. "Account Type_enc" -> "Account Type"
+        base_name = emb_name[:-4] if emb_name.endswith("_enc") else emb_name
+
+        # Prefer human-readable labels from tokenize_dict.json when available
+        labels = None
+        rows = None
+        filename_base = None
+        title = None
+
+        if base_name in tok_dict:
+            name_to_id = tok_dict[base_name]
+            items = sorted(name_to_id.items(), key=lambda kv: kv[1])
+            valid = [(name, idx) for name, idx in items if 0 <= idx < vocab_size]
+            if len(valid) == 0:
+                print(f"Skip: no valid tokens within vocab for {base_name}")
+                continue
+            if len(valid) > max_tokens_per_feature:
+                valid = valid[:max_tokens_per_feature]
+            labels = [name for name, idx in valid]
+            rows = [idx for _, idx in valid]
+            filename_base = base_name.replace(" ", "_")
+            title = f"{base_name} Embedding Cosine Heatmap (all tokens)"
+        else:
+            # Fall back to index-based labels for embeddings without tokenize_dict entries
+            n_tokens = min(vocab_size, max_tokens_per_feature)
+            rows = list(range(n_tokens))
+            labels = [f"{emb_name}_{i}" for i in rows]
+            filename_base = emb_name.replace(" ", "_")
+            title = f"{emb_name} Embedding Cosine Heatmap (index labels)"
+
+        sub_emb = emb_weight[rows, :]
+        cos_mat = _compute_cosine_matrix(sub_emb)
+
+        # Use different filename suffix to avoid overwriting existing clustered / manual plots.
+        filename = f"{filename_base}_all_cosine_heatmap.png"
+        save_path = os.path.join(save_dir, filename)
+        _plot_cosine_heatmap(
+            cos_mat,
+            labels,
+            title=title,
+            save_path=save_path,
+            max_ticks=50,
+        )
+        print(f"Saved: {save_path}")
+
+
 def plot_clustered_product_id_embedding(
     model, json_path, save_dir, n_clusters=8, max_tokens=50
 ):
@@ -798,14 +876,19 @@ def main():
     # Embedding visualization
     try:
         emb_save_dir = os.path.join(args.save_dir, 'embeddings')
-        visualize_cat_embeddings(model, json_path='tokenize_dict.json', save_dir=emb_save_dir)
+        # Existing visualizations (with clustering where applicable)
+        visualize_cat_embeddings(model, json_path='config/tokenize_dict.json', save_dir=emb_save_dir)
         plot_clustered_product_id_embedding(
-            model, 'tokenize_dict.json', emb_save_dir, n_clusters=args.product_id_clusters
+            model, 'config/tokenize_dict.json', emb_save_dir, n_clusters=args.product_id_clusters
         )
         plot_cluster_id_embedding(model, save_dir=emb_save_dir)
         plot_clustered_cluster_id_embedding(
             model, emb_save_dir, n_clusters=args.cluster_id_clusters
         )
+        # New: visualize ALL embedding layers without clustering.
+        # This will create additional heatmaps for every embedding in model.cat_embs,
+        # including discretized numeric features such as "Amount" and "account_age_quantized".
+        visualize_all_embeddings(model, json_path='config/tokenize_dict.json', save_dir=emb_save_dir)
     except Exception as e:
         print(f"Embedding visualization failed: {e}")
     
