@@ -53,33 +53,80 @@ def _discretize_amount(amount_series: pd.Series, n_bins: int = 12, percentile: f
 
 def _quantize_account_age(account_age_days: pd.Series) -> pd.Series:
     """
-    Account age quantization: divide account age (days) into several stages
+    Account age quantization: divide account age (days) into several finer-grained stages.
     
     Args:
         account_age_days: Account age in days
     
     Returns:
-        Quantized age encoding (0-4)
-        0: Less than 1 year (< 365 days)
-        1: 1-2 years (365-729 days)
-        2: 3-5 years (730-1824 days)
-        3: 5-10 years (1825-3650 days)
-        4: More than 10 years (> 3650 days)
+        Quantized age encoding (0-7)
+        0: < 7 days
+        1: 7-29 days    (~1 week - 1 month)
+        2: 30-89 days   (~1-3 months)
+        3: 90-364 days  (~3 months - 1 year)
+        4: 1-2 years    (365-729 days)
+        5: 3-5 years    (730-1824 days)
+        6: 5-10 years   (1825-3650 days)
+        7: > 10 years   (>= 3651 days)
     """
     age_quantized = pd.Series(0, index=account_age_days.index, dtype=int)
     
-    # Less than 1 year
-    age_quantized[account_age_days < 365] = 0
+    # < 7 days
+    age_quantized[account_age_days < 7] = 0
+    # 7-29 days
+    age_quantized[(account_age_days >= 7) & (account_age_days < 30)] = 1
+    # 30-89 days (~1-3 months)
+    age_quantized[(account_age_days >= 30) & (account_age_days < 90)] = 2
+    # 90-364 days (~3 months - 1 year)
+    age_quantized[(account_age_days >= 90) & (account_age_days < 365)] = 3
     # 1-2 years
-    age_quantized[(account_age_days >= 365) & (account_age_days < 730)] = 1
+    age_quantized[(account_age_days >= 365) & (account_age_days < 730)] = 4
     # 3-5 years
-    age_quantized[(account_age_days >= 730) & (account_age_days < 1825)] = 2
+    age_quantized[(account_age_days >= 730) & (account_age_days < 1825)] = 5
     # 5-10 years
-    age_quantized[(account_age_days >= 1825) & (account_age_days < 3651)] = 3
-    # More than 10 years
-    age_quantized[account_age_days >= 3651] = 4
+    age_quantized[(account_age_days >= 1825) & (account_age_days < 3651)] = 6
+    # > 10 years
+    age_quantized[account_age_days >= 3651] = 7
     
     return age_quantized
+
+
+def _quantize_member_age(member_age_years: pd.Series, bin_size: int = 10, max_age: int = 100) -> pd.Series:
+    """
+    Quantize Member Age (in years) into coarse age buckets.
+
+    The default strategy:
+        - Clip age into [0, max_age]
+        - Divide by `bin_size` (e.g. 10) and floor to get an integer bucket id
+        - Final range is [0, max_age // bin_size]
+
+    For example, with bin_size=10 and max_age=100:
+        0-9   -> 0
+        10-19 -> 1
+        ...
+        90-100+ -> 9
+    """
+    if member_age_years is None or len(member_age_years) == 0:
+        return pd.Series([], index=(member_age_years.index if isinstance(member_age_years, pd.Series) else None), dtype=int)
+
+    # Ensure numeric and at least 18
+    age = pd.to_numeric(member_age_years, errors="coerce").fillna(0)
+    age = age.clip(lower=18)
+
+    buckets = pd.Series(0, index=age.index, dtype=int)
+    # 18–24 -> 0 (already default)
+    # 25–34 -> 1
+    buckets[(age >= 25) & (age <= 34)] = 1
+    # 35–44 -> 2
+    buckets[(age >= 35) & (age <= 44)] = 2
+    # 45–54 -> 3
+    buckets[(age >= 45) & (age <= 54)] = 3
+    # 55–64 -> 4
+    buckets[(age >= 55) & (age <= 64)] = 4
+    # 65+ -> 5
+    buckets[age >= 65] = 5
+
+    return buckets
 
 
 def _select_csv_files(matched_dir: str, mode: str, train_val_test: tuple[float, float, float], seed: int) -> list[str]:
@@ -130,7 +177,9 @@ def _process_single_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         df["Amount"] = pd.to_numeric(df["Amount"].astype(str).str.replace('[\$,]', '', regex=True), errors="coerce").fillna(0.0)
         df["is_int"] = df["Amount"].apply(lambda x: x.is_integer())
     if "Member Age" in df.columns:
-        df["Member Age"] = pd.to_numeric(df["Member Age"], errors="coerce").fillna(0).astype(float)
+        # First convert to numeric, then quantize into coarse age buckets for embedding.
+        member_age_numeric = pd.to_numeric(df["Member Age"], errors="coerce").fillna(0).astype(float)
+        df["Member Age"] = _quantize_member_age(member_age_numeric)
 
     # Derive account_age_days if possible
     if "Account Open Date" in df.columns and "Post Date" in df.columns:
@@ -470,7 +519,7 @@ if __name__ == "__main__":
     
     try:
         loader, feature_names = create_dataloader(
-            matched_dir="clustered_out/no_fraud",
+            matched_dir="data/final/no_fraud",
             max_len=50,
             batch_size=32,
             shuffle=True,

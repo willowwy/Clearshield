@@ -27,6 +27,7 @@ from sklearn.metrics import (
     roc_auc_score, confusion_matrix, classification_report
 )
 from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
 
 from src.models.backbone_model import build_arg_parser, build_seq_model
 from src.models.datasets import create_dataloader
@@ -134,6 +135,226 @@ def print_model_hyperparameters(args):
     print("="*60 + "\n")
 
 
+def extract_hidden_representation(hidden_state, mask, device):
+    """
+    Extract hidden representation from model output.
+    
+    Handles different model types:
+    - LSTM: hidden_state is (h_n, c_n) tuple, extract last layer hidden state
+    - Transformer: hidden_state is [B, T, hidden_dim], extract last valid time step
+    
+    Args:
+        hidden_state: Model hidden state output (varies by model type)
+        mask: [B, T] mask indicating valid time steps
+        device: torch device
+        
+    Returns:
+        hidden_repr: [B, hidden_dim] or None if extraction fails
+    """
+    if hidden_state is None:
+        return None
+    
+    # Handle LSTM hidden state (tuple of (h_n, c_n))
+    if isinstance(hidden_state, tuple):
+        h_n, c_n = hidden_state
+        # h_n shape: [num_layers * num_directions, B, hidden_dim]
+        # For bidirectional LSTM: num_directions = 2
+        # For unidirectional LSTM: num_directions = 1
+        if h_n.dim() == 3:
+            num_layers_times_directions, B, hidden_dim = h_n.shape
+            # Determine if bidirectional (assuming even number means bidirectional)
+            # Common cases: 1 layer unidirectional = 1, 1 layer bidirectional = 2
+            #               2 layers unidirectional = 2, 2 layers bidirectional = 4
+            if num_layers_times_directions == 1:
+                # Single layer, unidirectional
+                hidden_repr = h_n[0]  # [B, hidden_dim]
+            elif num_layers_times_directions == 2:
+                # Could be: 1 layer bidirectional OR 2 layers unidirectional
+                # Try to detect: if both are similar, likely bidirectional
+                # For simplicity, assume it's bidirectional if we have 2
+                hidden_repr = torch.cat([h_n[0], h_n[1]], dim=-1)  # [B, hidden_dim * 2]
+            else:
+                # Multiple layers: take the last layer
+                # If bidirectional, last two elements are forward and backward of last layer
+                if num_layers_times_directions % 2 == 0:
+                    # Bidirectional: concatenate last two
+                    hidden_repr = torch.cat([h_n[-2], h_n[-1]], dim=-1)  # [B, hidden_dim * 2]
+                else:
+                    # Unidirectional: take last
+                    hidden_repr = h_n[-1]  # [B, hidden_dim]
+        else:
+            hidden_repr = h_n
+        return hidden_repr
+    
+    # Handle Transformer hidden state [B, T, hidden_dim]
+    elif isinstance(hidden_state, torch.Tensor):
+        if hidden_state.dim() == 3:
+            # Extract last valid time step for each sequence
+            B, T, D = hidden_state.shape
+            hidden_repr = []
+            for b in range(B):
+                # Find last valid time step
+                valid_steps = mask[b].nonzero(as_tuple=True)[0]
+                if len(valid_steps) > 0:
+                    last_idx = valid_steps[-1].item()
+                    hidden_repr.append(hidden_state[b, last_idx])
+                else:
+                    # If no valid steps, use first time step
+                    hidden_repr.append(hidden_state[b, 0])
+            hidden_repr = torch.stack(hidden_repr, dim=0)  # [B, hidden_dim]
+            return hidden_repr
+        elif hidden_state.dim() == 2:
+            # Already [B, hidden_dim]
+            return hidden_state
+        else:
+            print(f"Warning: Unexpected hidden_state shape: {hidden_state.shape}")
+            return None
+    
+    else:
+        print(f"Warning: Unknown hidden_state type: {type(hidden_state)}")
+        return None
+
+
+def plot_pca_visualization(results, save_dir, n_components=2):
+    """
+    Perform PCA on hidden states and visualize with fraud/non-fraud labels.
+    
+    Args:
+        results: Dictionary containing 'hidden_states' and 'labels'
+        save_dir: Directory to save the plot
+        n_components: Number of PCA components (default 2 for 2D visualization)
+    """
+    if len(results.get('hidden_states', [])) == 0:
+        print("No hidden states available for PCA visualization.")
+        return
+    
+    # Concatenate all hidden states
+    all_hidden = np.concatenate(results['hidden_states'], axis=0)  # [N, hidden_dim]
+    
+    # Get corresponding labels
+    # Hidden states are extracted per sequence (one per batch item)
+    # Labels are [B, T] shape, we need to match each sequence's hidden state with its label
+    all_labels_flat = []
+    masks = results.get('masks', [])
+    
+    for batch_idx, labels_batch in enumerate(results.get('labels', [])):
+        # labels_batch shape: [B, T]
+        # Get corresponding mask for this batch
+        mask_batch = masks[batch_idx] if batch_idx < len(masks) else None
+        
+        for seq_idx, seq_labels in enumerate(labels_batch):
+            # Find last valid time step for this sequence
+            if mask_batch is not None and seq_idx < len(mask_batch):
+                valid_mask = mask_batch[seq_idx] == 1
+                valid_indices = np.where(valid_mask)[0]
+                if len(valid_indices) > 0:
+                    # Use label from last valid time step
+                    last_valid_idx = valid_indices[-1]
+                    all_labels_flat.append(seq_labels[last_valid_idx])
+                else:
+                    # No valid steps, use first label
+                    all_labels_flat.append(seq_labels[0] if len(seq_labels) > 0 else 0)
+            else:
+                # No mask available, use last non-zero label or last element
+                valid_labels = seq_labels[seq_labels != 0] if len(seq_labels) > 0 else seq_labels
+                if len(valid_labels) > 0:
+                    all_labels_flat.append(valid_labels[-1])
+                else:
+                    all_labels_flat.append(seq_labels[-1] if len(seq_labels) > 0 else 0)
+    
+    # Ensure we have the same number of labels as hidden states
+    if len(all_labels_flat) != all_hidden.shape[0]:
+        print(f"Warning: Label count ({len(all_labels_flat)}) doesn't match hidden state count ({all_hidden.shape[0]}). Adjusting...")
+        # Truncate or pad to match
+        if len(all_labels_flat) > all_hidden.shape[0]:
+            all_labels_flat = all_labels_flat[:all_hidden.shape[0]]
+        elif len(all_labels_flat) < all_hidden.shape[0]:
+            all_labels_flat.extend([0] * (all_hidden.shape[0] - len(all_labels_flat)))
+    
+    all_labels_flat = np.array(all_labels_flat)
+    
+    print(f"\nPerforming PCA on hidden states...")
+    print(f"  Hidden state shape: {all_hidden.shape}")
+    print(f"  Number of samples: {len(all_labels_flat)}")
+    print(f"  Fraud samples (label=1): {np.sum(all_labels_flat == 1)}")
+    print(f"  Non-fraud samples (label=0): {np.sum(all_labels_flat == 0)}")
+    
+    # Perform PCA
+    pca = PCA(n_components=n_components, random_state=42)
+    hidden_pca = pca.fit_transform(all_hidden)
+    
+    # Calculate explained variance
+    explained_variance = pca.explained_variance_ratio_
+    print(f"  Explained variance ratio: {explained_variance}")
+    print(f"  Total explained variance: {np.sum(explained_variance):.4f}")
+    
+    # Plot PCA visualization
+    plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans']
+    plt.rcParams['axes.unicode_minus'] = False
+    
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    # Separate fraud and non-fraud samples
+    fraud_mask = all_labels_flat == 1
+    non_fraud_mask = all_labels_flat == 0
+    
+    if n_components == 2:
+        # 2D scatter plot
+        if np.any(non_fraud_mask):
+            ax.scatter(hidden_pca[non_fraud_mask, 0], hidden_pca[non_fraud_mask, 1], 
+                      c='blue', label='Non-Fraud (label=0)', alpha=0.6, s=20)
+        if np.any(fraud_mask):
+            ax.scatter(hidden_pca[fraud_mask, 0], hidden_pca[fraud_mask, 1], 
+                      c='red', label='Fraud (label=1)', alpha=0.6, s=20)
+        
+        ax.set_xlabel(f'PC1 (Explained Variance: {explained_variance[0]:.2%})')
+        ax.set_ylabel(f'PC2 (Explained Variance: {explained_variance[1]:.2%})')
+        ax.set_title('PCA Visualization of Hidden States\n(Fraud vs Non-Fraud)')
+    elif n_components == 3:
+        # 3D scatter plot
+        from mpl_toolkits.mplot3d import Axes3D
+        ax = fig.add_subplot(111, projection='3d')
+        
+        if np.any(non_fraud_mask):
+            ax.scatter(hidden_pca[non_fraud_mask, 0], 
+                      hidden_pca[non_fraud_mask, 1], 
+                      hidden_pca[non_fraud_mask, 2],
+                      c='blue', label='Non-Fraud (label=0)', alpha=0.6, s=20)
+        if np.any(fraud_mask):
+            ax.scatter(hidden_pca[fraud_mask, 0], 
+                      hidden_pca[fraud_mask, 1], 
+                      hidden_pca[fraud_mask, 2],
+                      c='red', label='Fraud (label=1)', alpha=0.6, s=20)
+        
+        ax.set_xlabel(f'PC1 ({explained_variance[0]:.2%})')
+        ax.set_ylabel(f'PC2 ({explained_variance[1]:.2%})')
+        ax.set_zlabel(f'PC3 ({explained_variance[2]:.2%})')
+        ax.set_title('PCA Visualization of Hidden States (3D)\n(Fraud vs Non-Fraud)')
+    else:
+        # For n_components > 3, plot first two components
+        if np.any(non_fraud_mask):
+            ax.scatter(hidden_pca[non_fraud_mask, 0], hidden_pca[non_fraud_mask, 1], 
+                      c='blue', label='Non-Fraud (label=0)', alpha=0.6, s=20)
+        if np.any(fraud_mask):
+            ax.scatter(hidden_pca[fraud_mask, 0], hidden_pca[fraud_mask, 1], 
+                      c='red', label='Fraud (label=1)', alpha=0.6, s=20)
+        
+        ax.set_xlabel(f'PC1 (Explained Variance: {explained_variance[0]:.2%})')
+        ax.set_ylabel(f'PC2 (Explained Variance: {explained_variance[1]:.2%})')
+        ax.set_title(f'PCA Visualization of Hidden States (First 2 Components)\n(Fraud vs Non-Fraud)')
+    
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, 'hidden_state_pca_visualization.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+    
+    print(f"PCA visualization saved to: {save_path}")
+
+
 def load_model(model_path, device):
     """Load trained model"""
     print(f"Loading model from: {model_path}")
@@ -174,6 +395,7 @@ def evaluate_model(model, test_loader, device, feature_names, target_indices, ar
     all_targets = []
     all_masks = []
     all_labels = []  # aligned fraud labels for target/pred steps (t+1)
+    all_hidden_states = []  # store hidden states for PCA visualization
     
     # Regression metrics
     total_mse = 0.0
@@ -217,6 +439,12 @@ def evaluate_model(model, test_loader, device, feature_names, target_indices, ar
                 all_targets.append(target_steps.cpu().numpy())
                 all_masks.append(valid_steps.cpu().numpy())
                 all_labels.append(label_steps.cpu().numpy())
+                
+                # Store hidden states for PCA visualization
+                # Extract hidden state representation based on model type
+                hidden_repr = extract_hidden_representation(hidden_state, mask, device)
+                if hidden_repr is not None:
+                    all_hidden_states.append(hidden_repr.cpu().numpy())
     
     # Calculate average metrics
     avg_mse = total_mse / num_batches if num_batches > 0 else 0.0
@@ -230,7 +458,8 @@ def evaluate_model(model, test_loader, device, feature_names, target_indices, ar
         'predictions': all_predictions,
         'targets': all_targets,
         'masks': all_masks,
-        'labels': all_labels
+        'labels': all_labels,
+        'hidden_states': all_hidden_states
     }
 
 
@@ -854,6 +1083,12 @@ def main():
     parser.add_argument('--product_id_clusters', type=int, default=8, help='Number of KMeans clusters for Product ID embedding')
     parser.add_argument('--cluster_id_clusters', type=int, default=8, help='Number of KMeans clusters for Cluster ID embedding')
     
+    # Visualization parameters
+    parser.add_argument('--plot_hidden', action='store_true', 
+                       help='Whether to plot PCA visualization of hidden states')
+    parser.add_argument('--plot_emb', action='store_true', 
+                       help='Whether to plot embedding visualizations')
+    
     args = parser.parse_args()
     
     # Set device
@@ -874,23 +1109,26 @@ def main():
     model, model_args = load_model(args.model_path, device)
 
     # Embedding visualization
-    try:
-        emb_save_dir = os.path.join(args.save_dir, 'embeddings')
-        # Existing visualizations (with clustering where applicable)
-        visualize_cat_embeddings(model, json_path='config/tokenize_dict.json', save_dir=emb_save_dir)
-        plot_clustered_product_id_embedding(
-            model, 'config/tokenize_dict.json', emb_save_dir, n_clusters=args.product_id_clusters
-        )
-        plot_cluster_id_embedding(model, save_dir=emb_save_dir)
-        plot_clustered_cluster_id_embedding(
-            model, emb_save_dir, n_clusters=args.cluster_id_clusters
-        )
-        # New: visualize ALL embedding layers without clustering.
-        # This will create additional heatmaps for every embedding in model.cat_embs,
-        # including discretized numeric features such as "Amount" and "account_age_quantized".
-        visualize_all_embeddings(model, json_path='config/tokenize_dict.json', save_dir=emb_save_dir)
-    except Exception as e:
-        print(f"Embedding visualization failed: {e}")
+    if args.plot_emb:
+        try:
+            emb_save_dir = os.path.join(args.save_dir, 'embeddings')
+            # Existing visualizations (with clustering where applicable)
+            visualize_cat_embeddings(model, json_path='config/tokenize_dict.json', save_dir=emb_save_dir)
+            plot_clustered_product_id_embedding(
+                model, 'config/tokenize_dict.json', emb_save_dir, n_clusters=args.product_id_clusters
+            )
+            plot_cluster_id_embedding(model, save_dir=emb_save_dir)
+            plot_clustered_cluster_id_embedding(
+                model, emb_save_dir, n_clusters=args.cluster_id_clusters
+            )
+            # New: visualize ALL embedding layers without clustering.
+            # This will create additional heatmaps for every embedding in model.cat_embs,
+            # including discretized numeric features such as "Amount" and "account_age_quantized".
+            visualize_all_embeddings(model, json_path='config/tokenize_dict.json', save_dir=emb_save_dir)
+        except Exception as e:
+            print(f"Embedding visualization failed: {e}")
+    else:
+        print("Skipping embedding visualization (use --plot_emb to enable)")
     
     # Create test data loader
     print("Loading test data...")
@@ -930,6 +1168,17 @@ def main():
     
     # Plot evaluation results
     plot_evaluation_results(results, analysis, resolved_target_names, args.save_dir)
+    
+    # PCA visualization of hidden states
+    if args.plot_hidden:
+        try:
+            plot_pca_visualization(results, args.save_dir, n_components=2)
+        except Exception as e:
+            print(f"PCA visualization failed: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        print("Skipping hidden state PCA visualization (use --plot_hidden to enable)")
     
     # Save evaluation results
     save_evaluation_results(results, analysis, resolved_target_names, args.save_dir, model)
