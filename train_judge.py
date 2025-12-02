@@ -202,7 +202,7 @@ def extract_judge_training_data(sequence_model, dataloader, device, feature_name
         return None, None, None, None
 
 
-def filter_fraud_batches(dataloader, min_fraud_rate=0.02):
+def filter_fraud_batches(dataloader, min_fraud_rate=0.02, mix_factor: float = 0.0, seed: int = 42):
     """
     Filter dataloader to only keep batches with fraud samples
     
@@ -213,7 +213,23 @@ def filter_fraud_batches(dataloader, min_fraud_rate=0.02):
     Returns:
         Filtered batches as list of tuples
     """
+    """
+    从 dataloader 中选择包含 fraud 的 batch，并按需要混入一定比例的 non-fraud batch。
+    
+    Args:
+        dataloader: 原始 dataloader（包含所有 batch）
+        min_fraud_rate: 认为是“有 fraud” batch 的最小 fraud 比例
+        mix_factor: non-fraud : fraud 的 batch 比例。
+            - 0.0: 只使用有 fraud 的 batch（原始行为）
+            - 1.0: non-fraud 与 fraud batch 数量大致相同
+            - 0.5: non-fraud 数量约为 fraud 的一半
+        seed: 随机种子（用于从 non-fraud 候选中采样）
+    
+    Returns:
+        选择后的 batch 列表（包含 fraud 和按比例混入的 non-fraud）
+    """
     fraud_batches = []
+    non_fraud_candidates = []
     
     print("Filtering batches with fraud samples...")
     
@@ -226,9 +242,39 @@ def filter_fraud_batches(dataloader, min_fraud_rate=0.02):
             
             if fraud_rate >= min_fraud_rate:
                 fraud_batches.append((X, y, mask))
+            else:
+                # 作为 non-fraud 候选 batch，后续按 mix_factor 采样
+                non_fraud_candidates.append((X, y, mask))
     
-    print(f"Kept {len(fraud_batches)} batches with fraud rate >= {min_fraud_rate}")
-    return fraud_batches
+    print(f"Found {len(fraud_batches)} batches with fraud rate >= {min_fraud_rate}")
+    print(f"Found {len(non_fraud_candidates)} non-fraud / low-fraud candidate batches")
+    
+    if mix_factor > 0.0 and len(fraud_batches) > 0 and len(non_fraud_candidates) > 0:
+        rng = np.random.RandomState(seed)
+        n_fraud = len(fraud_batches)
+        # 目标 non-fraud 数量
+        target_non_fraud = int(n_fraud * mix_factor)
+        target_non_fraud = max(1, target_non_fraud) if target_non_fraud > 0 else 0
+        target_non_fraud = min(target_non_fraud, len(non_fraud_candidates))
+        
+        if target_non_fraud > 0:
+            indices = np.arange(len(non_fraud_candidates))
+            rng.shuffle(indices)
+            selected_idx = indices[:target_non_fraud]
+            mixed_batches = fraud_batches + [non_fraud_candidates[i] for i in selected_idx]
+            print(f"Mixing in {target_non_fraud} non-fraud batches (mix_factor={mix_factor})")
+        else:
+            mixed_batches = fraud_batches
+            print(f"mix_factor={mix_factor} but no non-fraud batches selected (maybe dataset too small).")
+    else:
+        mixed_batches = fraud_batches
+        if mix_factor > 0.0 and len(fraud_batches) == 0:
+            print("Warning: No fraud batches found, cannot apply mix_factor.")
+        if mix_factor > 0.0 and len(non_fraud_candidates) == 0:
+            print("Warning: No non-fraud candidate batches found, cannot apply mix_factor.")
+    
+    print(f"Kept {len(mixed_batches)} batches after mixing (fraud + non-fraud)")
+    return mixed_batches
 
 
 def create_judge_dataset(predictions, targets, hidden_states, labels, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1, seed=42):
@@ -608,6 +654,9 @@ def main():
                        help="Batch size for sequence model")
     parser.add_argument("--min_fraud_rate", type=float, default=0.01,
                        help="Minimum fraud rate to keep batch")
+    parser.add_argument("--mix_factor", type=float, default=1,
+                       help="Ratio of non-fraud to fraud batches to mix in (0.0 = only fraud batches). "
+                            "Applied when selecting batches for judge training/validation/testing.")
     
     # Judge model parameters
     parser.add_argument("--judge_hidden_dims", type=int, nargs="+", default=[64, 32, 16],
@@ -752,8 +801,13 @@ def main():
     print(f"Target features: {resolved_target_names}")
     print(f"Target indices: {target_indices}")
     
-    # Filter batches with fraud samples
-    fraud_batches = filter_fraud_batches(dataloader, args.min_fraud_rate)
+    # Filter batches with fraud samples（可选混入部分 non-fraud batches）
+    fraud_batches = filter_fraud_batches(
+        dataloader,
+        min_fraud_rate=args.min_fraud_rate,
+        mix_factor=getattr(args, "mix_factor", 0.0),
+        seed=args.seed,
+    )
     
     if len(fraud_batches) == 0:
         print("No batches with fraud samples found!")
@@ -798,11 +852,29 @@ def main():
         print("No valid training data extracted!")
         return
     
-    # Create train/val/test splits
-    dataset_splits = create_judge_dataset(
-        predictions, targets, hidden_states, labels,
-        args.train_ratio, args.val_ratio, args.test_ratio, args.seed
-    )
+    # 如果是 test_only 模式，直接使用所有提取的数据作为 test 集，不进行二次划分
+    # 这样可以保持数据的原始顺序，并且避免不必要的随机划分
+    if test_only:
+        # 直接创建 test split，不进行随机划分
+        # 创建空的 train 和 val split，保持与 create_judge_dataset 返回格式一致
+        if len(hidden_states.shape) > 1:
+            empty_hidden = np.empty((0, *hidden_states.shape[1:]), dtype=hidden_states.dtype)
+        else:
+            empty_hidden = np.array([], dtype=hidden_states.dtype)
+        
+        dataset_splits = {
+            'train': (None, np.array([]), empty_hidden, np.array([])),
+            'val': (None, np.array([]), empty_hidden, np.array([])),
+            'test': (predictions, targets, hidden_states, labels)
+        }
+        print(f"Test-only mode: Using all {len(targets)} extracted samples for evaluation")
+        print(f"  No random splitting applied - using data in original order from create_dataloader")
+    else:
+        # Create train/val/test splits
+        dataset_splits = create_judge_dataset(
+            predictions, targets, hidden_states, labels,
+            args.train_ratio, args.val_ratio, args.test_ratio, args.seed
+        )
     
     print(f"Dataset splits:")
     for split_name, (pred, target, hidden, label) in dataset_splits.items():
