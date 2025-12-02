@@ -192,7 +192,7 @@ def extract_judge_training_data(sequence_model, dataloader, device, feature_name
         
         print(f"Extracted {len(targets)} samples for judge training")
         print(f"Fraud rate: {np.mean(labels):.4f}")
-        print(f"Hidden state shape: {hidden_states.shape}")
+        print(f"Hidden state shape: {hidden_states.shape} (expected: [N, {max_len}, hidden_dim])")
         if predictions is not None:
             print(f"Predictions shape: {predictions.shape}")
         
@@ -460,6 +460,16 @@ def evaluate_judge_model(judge_model, test_data, device, hist_path=None):
     else:
         print(f"Debug - test_pred is None")
     
+    # Verify hidden state sequence length matches model expectation
+    expected_hidden_len = getattr(judge_model, 'max_len', None)
+    if expected_hidden_len is not None:
+        if test_hidden.shape[1] != expected_hidden_len:
+            print(f"ERROR: test_hidden sequence length ({test_hidden.shape[1]}) doesn't match model expectation ({expected_hidden_len})")
+            print(f"This will cause incorrect predictions! Please ensure --hidden_len={expected_hidden_len} when extracting test data.")
+            raise ValueError(f"Hidden state sequence length mismatch: got {test_hidden.shape[1]}, expected {expected_hidden_len}")
+        else:
+            print(f"✓ Verified: test_hidden sequence length ({test_hidden.shape[1]}) matches model expectation ({expected_hidden_len})")
+    
     # Evaluate
     judge_model.eval()
     with torch.no_grad():
@@ -591,7 +601,9 @@ def main():
     parser.add_argument("--data_dir", type=str, default="data/final/matched",
                        help="Data directory")
     parser.add_argument("--max_len", type=int, default=50,
-                       help="Maximum sequence length")
+                       help="Maximum sequence length for sequence model")
+    parser.add_argument("--hidden_len", type=int, default=3,
+                       help="Maximum hidden state sequence length for judge model (must match training)")
     parser.add_argument("--batch_size", type=int, default=32,
                        help="Batch size for sequence model")
     parser.add_argument("--min_fraud_rate", type=float, default=0.01,
@@ -712,6 +724,10 @@ def main():
     print("Loading data...")
     # Use test mode if only testing
     data_mode = "test" if test_only else "train"
+    use_sliding_window = getattr(args, 'use_sliding_window', False)
+    if test_only and use_sliding_window:
+        print("Warning: Sliding window is enabled but test mode doesn't use sliding window in create_dataloader.")
+        print("This is expected - sliding window only applies during training mode.")
     dataloader, feature_names = create_dataloader(
         matched_dir=args.data_dir,
         max_len=args.max_len,
@@ -721,7 +737,7 @@ def main():
         split=(args.train_ratio, args.val_ratio, args.test_ratio),
         seed=args.seed,
         drop_all_zero_batches=False,
-        use_sliding_window=getattr(args, 'use_sliding_window', False),
+        use_sliding_window=use_sliding_window,
         window_overlap=getattr(args, 'window_overlap', 0.5)
     )
     
@@ -755,13 +771,30 @@ def main():
     fraud_dataset = FraudBatchDataset(fraud_batches)
     fraud_dataloader = torch.utils.data.DataLoader(fraud_dataset, batch_size=1, shuffle=False, collate_fn=lambda x: x[0])
     
+    # If loading a judge model, get hidden_len from checkpoint first to avoid re-extraction
+    if args.judge_model_path is not None:
+        # Temporarily load checkpoint to get hidden_len
+        checkpoint = torch.load(args.judge_model_path, map_location=device, weights_only=False)
+        checkpoint_args = checkpoint.get('args', None)
+        if checkpoint_args is not None:
+            if isinstance(checkpoint_args, dict):
+                from argparse import Namespace
+                checkpoint_args = Namespace(**checkpoint_args)
+            checkpoint_hidden_len = getattr(checkpoint_args, 'hidden_len', getattr(checkpoint_args, 'max_len', None))
+            if checkpoint_hidden_len is not None:
+                print(f"Found hidden_len={checkpoint_hidden_len} in checkpoint, using it for data extraction")
+                args.hidden_len = checkpoint_hidden_len
+    
     # Extract training data using sequence model
+    # Use hidden_len for judge model, not max_len (which is for sequence model)
+    hidden_len = getattr(args, 'hidden_len', 3)
+    print(f"Using hidden_len={hidden_len} for judge model (sequence model max_len={args.max_len})")
     predictions, targets, hidden_states, labels = extract_judge_training_data(
         sequence_model, fraud_dataloader, device, feature_names, target_indices, target_names, 
-        use_pred=args.use_pred, max_len=args.max_len
+        use_pred=args.use_pred, max_len=hidden_len
     )
     
-    if targets is None:
+    if targets is None:                             
         print("No valid training data extracted!")
         return
     
@@ -804,14 +837,42 @@ def main():
             if not hasattr(args, key) or getattr(args, key) is None:
                 setattr(args, key, value)
         
+        # Get hidden_len from checkpoint (check both hidden_len and max_len)
+        checkpoint_hidden_len = getattr(judge_checkpoint_args, 'hidden_len', getattr(judge_checkpoint_args, 'max_len', None))
+        if checkpoint_hidden_len is not None and checkpoint_hidden_len != args.hidden_len:
+            print(f"Warning: Checkpoint hidden_len={checkpoint_hidden_len} differs from provided hidden_len={args.hidden_len}.")
+            print(f"Updating hidden_len to {checkpoint_hidden_len} and re-extracting data...")
+            args.hidden_len = checkpoint_hidden_len
+            # Re-extract data with correct hidden_len
+            predictions, targets, hidden_states, labels = extract_judge_training_data(
+                sequence_model, fraud_dataloader, device, feature_names, target_indices, target_names, 
+                use_pred=args.use_pred, max_len=args.hidden_len
+            )
+            if targets is None:
+                print("No valid training data extracted after re-extraction!")
+                return
+            
+            # Recreate dataset splits with new data
+            dataset_splits = create_judge_dataset(
+                predictions, targets, hidden_states, labels,
+                args.train_ratio, args.val_ratio, args.test_ratio, args.seed
+            )
+            
+            print(f"Re-extracted dataset splits:")
+            for split_name, (pred, target, hidden, label) in dataset_splits.items():
+                if len(target) > 0:
+                    fraud_rate = np.mean(label)
+                    print(f"  {split_name}: {len(target)} samples, fraud rate: {fraud_rate:.4f}")
+        
         # If loaded model requires predictions but we didn't extract them, re-extract with predictions
         if getattr(judge_checkpoint_args, 'use_pred', False) and not args.use_pred:
             print(f"Warning: Loaded model requires predictions (use_pred=True), but data was extracted with use_pred=False.")
             print(f"Re-extracting data with use_pred=True...")
             args.use_pred = True
+            # Use the correct hidden_len (should already be updated from checkpoint if needed)
             predictions, targets, hidden_states, labels = extract_judge_training_data(
                 sequence_model, fraud_dataloader, device, feature_names, target_indices, target_names, 
-                use_pred=True, max_len=args.max_len
+                use_pred=True, max_len=args.hidden_len
             )
             if targets is None:
                 print("No valid training data extracted after re-extraction!")
@@ -848,6 +909,9 @@ def main():
         print(f"  Use basic features: {use_basic_features}")
         print(f"  Hidden dimension: {hidden_dim}")
         
+        # Use hidden_len consistently for judge model
+        hidden_len = getattr(args, 'hidden_len', 3)
+        print(f"Building judge model with hidden_len={hidden_len}")
         judge_model = build_judge_model(
             pred_dim=pred_dim,
             hidden_dims=args.judge_hidden_dims,
@@ -857,7 +921,7 @@ def main():
             use_basic_features=use_basic_features,
             hidden_dim=hidden_dim,
             use_pred=args.use_pred,
-            max_len=getattr(args, 'hidden_len', 3),  # Use the same max_len as training data extraction
+            max_len=hidden_len,  # Use hidden_len consistently
             cnn_out_channels=getattr(args, 'judge_cnn_out_channels', 16),
             cnn_kernel_sizes=getattr(args, 'judge_cnn_kernel_sizes', [1, 3])
         ).to(device)

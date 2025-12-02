@@ -213,7 +213,8 @@ def load_judge_model(judge_model_path, device, pred_dim=None):
     final_hidden_dim = inferred_hidden_dim if inferred_hidden_dim is not None else getattr(args, 'hidden_dim', None)
     
     # Get CNN-related parameters from checkpoint args
-    max_len = getattr(args, 'max_len', 50)
+    # Check both max_len and hidden_len (hidden_len is the new parameter name)
+    max_len = getattr(args, 'hidden_len', getattr(args, 'max_len', 50))
     cnn_out_channels = getattr(args, 'judge_cnn_out_channels', None)
     cnn_kernel_sizes = getattr(args, 'judge_cnn_kernel_sizes', None)
     
