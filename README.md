@@ -6,6 +6,175 @@ A machine learning system for detecting fraudulent transactions using traditiona
 
 This fraud detection system combines traditional machine learning with deep learning approaches to identify fraudulent transactions. The system features a hybrid architecture that leverages both statistical features and sequential patterns.
 
+## 🚀 Quick Start
+
+### 1. Setup Environment
+
+```bash
+# Clone repository
+git clone <repository-url>
+cd ClearShield
+
+# Setup (create directories + install dependencies)
+make setup
+```
+
+Or manually:
+```bash
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+python setup.py
+```
+
+### 2. Data Preprocessing
+
+Place your raw data in `data/train/raw/` or `data/pred/raw/`, then run:
+
+```bash
+# Training data pipeline (5 stages)
+make run-train
+
+# Prediction data pipeline (4 stages)
+make run-pred
+```
+
+Or use Python directly:
+```bash
+cd src/data_preprocess
+python run_train_pipeline.py          # Training mode
+python run_pred_pipeline.py           # Prediction mode
+```
+
+### 3. Model Training
+
+```bash
+# Train sequence model (Step 1)
+make train-seq
+
+# Train judge model (Step 2)
+make train-judge
+
+# Or train both models sequentially
+make train-all
+```
+
+Advanced options:
+```bash
+# Custom training parameters
+make train-seq EPOCHS=200 MAX_LEN=100 SAVE_DIR=my_checkpoints
+```
+
+### 4. Model Inference
+
+```bash
+# Run inference on a single member
+make infer MEMBER_ID=12345
+
+# Use custom data folder
+make infer MEMBER_ID=12345 INFER_FOLDER=data/pred/final
+```
+
+Or use Python directly:
+```bash
+cd src/models
+python inference.py \
+  --folder ../../data/train/final/matched \
+  --member_id 12345 \
+  --sequence_model_path ../../checkpoints/best_model_enc.pth \
+  --judge_model_path ../../checkpoints/best_judge_model.pth \
+  --max_len 50
+```
+
+### 5. View All Commands
+
+```bash
+make help
+```
+
+## 🔄 Data Processing Pipeline
+
+The system processes data through 5 sequential stages:
+
+### Training Pipeline (5 Stages)
+1. **Data Cleaning** - Standardize headers, fix formatting, clean Amount field
+2. **Feature Engineering** - BERT encoding, PCA reduction, clustering (k=60)
+3. **Fraud Matching** - Reorganize by member, match fraud adjustments, categorize
+4. **Feature Encoding** - Encode categorical features, parse time/date fields
+5. **Vulnerability Scanning** (Optional) - Security testing, adversarial attack detection
+
+**Data Flow**: `raw/` → `cleaned/` → `clustered_out/` → `by_member/` → `final/`
+
+### Prediction Pipeline (4 Stages)
+Same as training pipeline but uses pre-trained clustering models (Stages 1-4 only).
+
+**Output**: Model-ready datasets in `data/train/final/` or `data/pred/final/`
+
+## 🔧 Configuration
+
+### Pipeline Parameters
+
+**Training Pipeline:**
+```bash
+python run_train_pipeline.py --help                    # Show all options
+python run_train_pipeline.py --min-history 15          # Minimum 15 transactions per member
+python run_train_pipeline.py --skip-vuln-scan          # Skip security scanning
+python run_train_pipeline.py --vuln-sample-size 2000   # Use 2000 samples for scanning
+```
+
+**Model Training:**
+```bash
+# Configurable via Makefile variables
+EPOCHS=110              # Training epochs (default: 110)
+MAX_LEN=50              # Maximum sequence length (default: 50)
+SAVE_DIR=checkpoints    # Model save directory (default: checkpoints)
+```
+
+### Custom Data Paths
+
+Override paths programmatically:
+```python
+from src.data_preprocess.feature_engineering import run_stage2
+
+run_stage2(
+    processed_dir='/custom/path/to/cleaned',
+    output_dir='/custom/path/to/output',
+    model_name='prajjwal1/bert-tiny',
+    pca_dim=20,
+    max_k=60
+)
+```
+
+## 🔮 Inference Mode
+
+For processing new data using pre-trained models:
+
+### Using Prediction Pipeline
+```bash
+# Place new data in data/pred/raw/
+make run-pred
+
+# Run inference
+make infer MEMBER_ID=12345 INFER_FOLDER=data/pred/final
+```
+
+### Manual Stage 2 Inference
+```bash
+cd src/data_preprocess/02_feature_engineering
+python inference_stage2.py \
+  --input ../../data/pred/cleaned \
+  --output ../../data/pred/clustered_out \
+  --model cluster_model.pkl
+```
+
+## 🧹 Cleaning
+
+```bash
+make clean-train      # Clean training data
+make clean-pred       # Clean prediction data
+make clean-models     # Remove model checkpoints
+make clean            # Clean all data directories
+```
+
 ## 📁 Project Structure
 
 ```
@@ -16,261 +185,77 @@ ClearShield/
 │   │   ├── cleaned/             # Cleaned datasets (Stage 1)
 │   │   ├── clustered_out/       # Clustered datasets (Stage 2)
 │   │   ├── by_member/           # Fraud-matched datasets (Stage 3)
-│   │   │   ├── temp/            # Temporary (auto-deleted)
-│   │   │   ├── matched/         # Members with matched fraud
-│   │   │   ├── unmatched/       # Members with unmatched fraud
-│   │   │   ├── no_fraud/        # Members without fraud
-│   │   │   └── member_summary.csv
+│   │   │   ├── temp/            # Temporary files
+│   │   │   ├── matched/         # Fraud matched members
+│   │   │   ├── unmatched/       # Fraud unmatched members
+│   │   │   └── no_fraud/        # No fraud members
 │   │   └── final/               # Final encoded datasets (Stage 4)
-│   │       ├── matched/         # Ready for model training
+│   │       ├── matched/         # Model-ready
 │   │       ├── unmatched/
 │   │       └── no_fraud/
 │   │
-│   ├── pred/                    # Prediction data pipeline
-│   │   ├── raw/                 # New transaction data
-│   │   ├── cleaned/             # Cleaned (Stage 1)
-│   │   ├── clustered_out/       # Clustered (Stage 2 - inference)
-│   │   ├── by_member/           # Reorganized by member (Stage 3)
-│   │   └── final/               # Encoded for prediction (Stage 4)
-│   │
-│   └── external/                # External data sources (optional)
-│
-├── docs/                        # Documentation files
-│
-├── notebooks/                   # Jupyter notebooks for analysis
+│   └── pred/                    # Prediction data pipeline
+│       ├── raw/                 # New transaction data
+│       ├── cleaned/
+│       ├── clustered_out/
+│       ├── by_member/
+│       └── final/
 │
 ├── src/
 │   ├── data_preprocess/
-│   │   ├── 01_data_cleaning/        # Step 1: Data cleaning scripts
-│   │   ├── 02_feature_engineering/  # Step 2: Feature engineering
-│   │   │   ├── 02a_transaction_type_clustering/ # Cluster transaction types
-│   │   │   ├── 02b_description_encoding/        # BERT encoding + clustering
-│   │   │   └── 02_feature_engineering.py        # Main pipeline
-│   │   ├── 03_fraud_relabeling/     # Step 3: Fraud matching and re-labeling
-│   │   ├── 04_encoding/             # Step 4: Feature encoding
-│   │   ├── 05_security/             # Step 5: Vulnerability scanning & encryption
-│   │   ├── train_pipeline.ipynb     # Training pipeline notebook
-│   │   ├── pred_pipeline.ipynb      # Prediction pipeline notebook
-│   │   ├── run_train_pipeline.py    # Automated training pipeline
-│   │   └── run_pred_pipeline.py     # Automated prediction pipeline
+│   │   ├── 01_data_cleaning/
+│   │   ├── 02_feature_engineering/
+│   │   │   ├── 02a_transaction_type_clustering/
+│   │   │   └── 02b_description_encoding/
+│   │   ├── 03_fraud_relabeling/
+│   │   ├── 04_encoding/
+│   │   ├── 05_security/
+│   │   ├── train_pipeline.ipynb
+│   │   ├── pred_pipeline.ipynb
+│   │   ├── run_train_pipeline.py
+│   │   └── run_pred_pipeline.py
 │   │
 │   └── models/
-│       ├── preprocessing/           # Model-specific preprocessing
-│       └── __init__.py
+│       ├── backbone_model.py    # Sequence model
+│       ├── judge.py             # Fraud judge model
+│       ├── datasets.py          # Data loaders
+│       ├── inference.py         # Inference script
+│       ├── load_model.py        # Model loading utilities
+│       └── loss.py              # Loss functions
 │
-├── config/                      # Configuration files
+├── config/
+│   ├── pipeline_config.py       # Centralized path configuration
 │   └── tokenize_dict.json       # Categorical encoding dictionary
 │
-├── .venv/                       # Virtual environment
-├── venv/                        # Alternative virtual environment
+├── checkpoints/                 # Trained model checkpoints
+├── notebooks/                   # Jupyter notebooks for analysis
+├── docs/                        # Documentation
 │
-├── .gitignore
-├── README.md
-├── requirements.txt
-└── setup.py
+├── train.py                     # Sequence model training
+├── train_judge.py               # Judge model training
+├── Makefile                     # Automation commands
+├── setup.py                     # Project setup script
+├── requirements.txt             # Python dependencies
+└── README.md
 ```
 
-## 🔄 Data Processing Pipeline
+## 📦 Dependencies
 
-The preprocessing pipeline consists of 5 sequential stages:
+See `requirements.txt` for full list. Key dependencies:
+- PyTorch ≥2.2.0
+- Transformers ≥4.38.0
+- scikit-learn ≥1.3.0
+- pandas ≥2.0.0
+- numpy ≥1.24.0
+- joblib ≥1.3.0
+- cryptography ≥41.0.0
 
-### Step 1: Data Cleaning (`01_data_cleaning`)
-- Standardize CSV headers
-- Fix comma and formatting issues
-- Clean Amount field (remove $, convert to numeric)
-- Fill missing values
-- Rename files based on date range
+## 🔐 Security
 
-**Data Flow**: `train/raw/` → `train/cleaned/`
+Stage 5 vulnerability scanning includes:
+- Data poisoning detection
+- Adversarial attack testing (FGSM, PGD)
+- Privacy attack simulation
+- Automated security reporting
 
-### Step 2: Feature Engineering (`02_feature_engineering`)
-- Encode transaction descriptions using BERT-tiny (`prajjwal1/bert-tiny`)
-- Apply PCA dimensionality reduction (default: 20 dimensions)
-- Perform automatic clustering (MiniBatchKMeans, k=60)
-- Add cluster_id column
-- **Configurable paths**: Supports custom input/output directories via parameters
-
-**Data Flow**: `train/cleaned/` → `train/clustered_out/`
-
-### Step 3: Fraud Matching (`03_fraud_relabeling`)
-- **Stage 1**: Reorganize transactions by Member ID
-- **Stage 2**: Match fraud adjustments to original transactions
-  - Extract dates from fraud descriptions
-  - Match by amount and time window (30 days)
-  - Prioritize "Mobile Deposit" transactions
-- Filter members with ≥10 transactions (configurable)
-- Categorize into matched/unmatched/no_fraud
-
-**Data Flow**: `train/clustered_out/` → `train/by_member/` → `train/processed/[matched|unmatched|no_fraud]/`
-
-### Step 4: Feature Encoding (`04_encoding`)
-- Remove ID columns (Account ID, Member ID)
-- Encode categorical features (Account Type, Action Type, Source Type, Product ID)
-- Parse time features to `time` objects (HH:MM:SS format)
-- Convert date features to datetime
-- Remove text columns (Transaction Description, Fraud Adjustment Indicator)
-
-**Data Flow**: `train/processed/` → `train/final/[matched|unmatched|no_fraud]/`
-
-### Step 5: Vulnerability Scanning (`05_security`) - Optional
-- **Security Testing**: Runs comprehensive vulnerability scans on processed data
-- **Data Poisoning Detection**: Tests model robustness against adversarial inputs
-- **Model Attack Simulation**: FGSM, PGD, and boundary attacks
-- **Privacy Testing**: Membership inference and attribute inference attacks
-- **Encryption Support**: Provides data encryption handlers for secure storage
-- **Automated Reporting**: Generates detailed JSON reports with security metrics
-
-**Input**: `data/train/final/` (model-ready datasets)
-**Output**: `vulnerability_scan_results.json` (security report)
-
-**Final Output**: `data/train/final/` contains model-ready, security-tested datasets
-
-## 🚀 Quick Start
-
-1. **Clone the repository**
-
-```bash
-git clone <repository-url>
-cd ClearShield
-```
-
-2. **Set up environment**
-
-```bash
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-python setup.py            # Creates directories and installs dependencies
-```
-
-Or use Makefile:
-```bash
-make setup
-```
-
-3. **Run the preprocessing pipeline**
-
-**Option A: Automated Script (Recommended)**
-```bash
-cd src/data_preprocess
-python run_train_pipeline.py
-```
-
-Advanced usage:
-```bash
-python run_train_pipeline.py --help                    # Show all options
-python run_train_pipeline.py --skip-cleaning           # Skip data cleaning
-python run_train_pipeline.py --min-history 15          # Set minimum history to 15
-python run_train_pipeline.py --skip-vuln-scan          # Skip vulnerability scanning
-python run_train_pipeline.py --vuln-sample-size 2000   # Use 2000 samples for scanning
-```
-
-**Option B: Jupyter Notebook (For exploration)**
-- Open `src/data_preprocess/train_pipeline.ipynb`
-- Execute cells sequentially to run the complete 5-stage pipeline
-
-**Final datasets** will be in `data/train/final/[matched|unmatched|no_fraud]/`
-
-4. **Train models**
-
-- Navigate to `src/models/`
-- Use datasets from `data/train/final/[matched|unmatched|no_fraud]/`
-- Follow model-specific training instructions
-
-## 🔧 Advanced Configuration
-
-### Custom Data Paths
-You can override default paths programmatically:
-
-```python
-from src.data_preprocess.feature_engineering import run_stage2
-
-run_stage2(
-    processed_dir='/custom/path/to/cleaned',
-    output_dir='/custom/path/to/output',
-    model_name='prajjwal1/bert-tiny',
-    pca_dim=20,
-    max_k=60,
-    verbose=True
-)
-```
-
-### Pipeline Parameters
-
-**Training Pipeline (`run_train_pipeline.py`):**
-- `--min-history N`: Minimum transaction count per member (default: 10)
-- `--skip-cleaning`: Skip data cleaning stage
-- `--skip-feature-engineering`: Skip feature engineering stage
-- `--skip-fraud-matching`: Skip fraud matching stage
-- `--skip-encoding`: Skip feature encoding stage
-- `--skip-vuln-scan`: Skip vulnerability scanning stage
-- `--vuln-sample-size N`: Number of samples for vulnerability scanning (default: 1000)
-
-**Prediction Pipeline (`run_pred_pipeline.py`):**
-- Similar parameters as training pipeline
-- Optimized for inference mode (uses pre-trained models)
-
-## 🔮 Prediction Pipeline (Inference Mode)
-
-For processing new data without retraining the clustering model:
-
-### 1. Train Mode (One-time Setup)
-First, run the training pipeline to create and save the clustering model:
-
-```bash
-cd src/data_preprocess
-python run_train_pipeline.py  # Saves cluster_model.pkl
-```
-
-This will save `cluster_model.pkl` containing:
-- Pre-trained PCA transformer
-- Fitted KMeans clustering model
-- BERT model configuration
-
-### 2. Inference Mode (For New Data)
-Apply the saved model to new data without retraining:
-
-**Single CSV file:**
-```bash
-cd src/data_preprocess/02_feature_engineering
-python inference_stage2.py \
-  --input /path/to/new/data.csv \
-  --output /path/to/output/data.csv \
-  --model cluster_model.pkl
-```
-
-**Entire directory:**
-```bash
-python inference_stage2.py \
-  --input /path/to/new/cleaned/ \
-  --output /path/to/new/clustered_out/ \
-  --model cluster_model.pkl
-```
-
-**Parameters:**
-- `--input`: Input CSV file or directory
-- `--output`: Output CSV file or directory
-- `--model`: Path to saved model (default: `cluster_model.pkl`)
-- `--text-column`: Column name for transaction descriptions (default: `Transaction Description`)
-- `--batch-size`: Encoding batch size (default: 512)
-- `--quiet`: Suppress progress output
-
-### 3. Complete Prediction Pipeline
-For end-to-end processing of new data:
-
-```bash
-# Use the automated prediction pipeline
-cd src/data_preprocess
-python run_pred_pipeline.py
-
-# Or run steps manually:
-# Step 1: Clean new data
-python run_pred_pipeline.py --skip-feature-engineering --skip-fraud-matching --skip-encoding
-
-# Step 2: Apply clustering (inference mode)
-python 02_feature_engineering/inference_stage2.py \
-  --input ../../data/pred/cleaned \
-  --output ../../data/pred/clustered_out
-
-# Step 3: Continue with fraud matching and encoding
-python run_pred_pipeline.py --skip-cleaning --skip-feature-engineering
-```
+Output: `vulnerability_scan_results.json`
