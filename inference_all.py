@@ -14,6 +14,7 @@ import torch
 import numpy as np
 import json
 import pandas as pd
+import copy
 from pathlib import Path
 
 # Import functions from inference.py
@@ -69,7 +70,7 @@ def calculate_mse(predictions, targets):
     
     return float(mse.item() if isinstance(mse, torch.Tensor) else mse)
 
-
+import random
 def prepare_sequence_data(df, max_len, feature_names):
     """
     Prepare sequence data: Process the entire DataFrame and build sequences
@@ -264,6 +265,13 @@ def infer_single_csv(csv_file, sequence_model_path, judge_model_path, max_len=50
     print("="*60)
     judge_model, judge_args = load_judge_model(judge_model_path, device, pred_dim=len(target_indices))
     
+    # Get parameters from checkpoint to ensure consistency with training
+    judge_hidden_len = getattr(judge_args, 'hidden_len', getattr(judge_args, 'max_len', 50))
+    judge_use_pred = getattr(judge_args, 'use_pred', False)
+    print(f"Judge model parameters from checkpoint:")
+    print(f"  hidden_len: {judge_hidden_len}")
+    print(f"  use_pred: {judge_use_pred}")
+    
     # Perform inference for each time step
     if verbose:
         print("\n" + "="*60)
@@ -309,21 +317,62 @@ def infer_single_csv(csv_file, sequence_model_path, judge_model_path, max_len=50
         all_mse.append(mse)
         
         # Process hidden state for judge model
-        # New judge model uses 1D CNN, so pass full sequence [B, T, hidden_dim]
-        # Judge model will pad/truncate to max_len automatically
+        # CRITICAL: Follow the EXACT same logic as extract_judge_training_data to ensure consistency
+        # Training logic: for time step t, use hidden_state[:, :t+1, :] then pad/truncate to judge_hidden_len
         if isinstance(hidden_state, tuple):
             # LSTM: only final hidden state available, will be expanded in judge model
             h_n, c_n = hidden_state
-            hidden_rep = h_n[-1]  # [1, hidden_size]
+            hidden_last = h_n[-1]  # [1, hidden_size]
+            # Expand to sequence format: [1, hidden_size] -> [1, judge_hidden_len, hidden_size]
+            # Use the same hidden state for all time steps (consistent with training)
+            hidden_rep = hidden_last.unsqueeze(1).expand(-1, judge_hidden_len, -1)  # [1, judge_hidden_len, hidden_dim]
             mask_for_judge = None  # LSTM doesn't have sequence mask
         else:
-            # Transformer: [1, T, hidden_dim] - pass full sequence
-            hidden_rep = hidden_state  # [1, T, hidden_dim]
-            # Pass mask to help judge model handle padding
-            mask_for_judge = mask  # [1, max_len]
+            # Transformer: hidden_state is [1, max_len, hidden_dim]
+            # Training logic: use hidden_state[:, :t+1, :] for time step t
+            # In inference, we input [0:t+1] padded to max_len, so:
+            # - If t+1 <= max_len: hidden_state[:, :t+1, :] is the actual sequence (but may be padded)
+            # - If t+1 > max_len: hidden_state is already truncated to max_len
+            # 
+            # Key: We need to extract the sequence from BEGINNING, matching training logic
+            # The actual sequence length is t+1 (or max_len if truncated)
+            actual_seq_len = int(mask.sum().item())  # Number of valid positions (t+1 or max_len)
+            original_seq_len = t + 1  # Original sequence length before padding/truncation
+            
+            # Extract sequence from beginning, matching training: hidden_state[:, :seq_end, :]
+            # where seq_end = min(t+1, max_len) in training
+            seq_end = min(original_seq_len, hidden_state.shape[1])
+            
+            # Use the sequence from beginning to seq_end (matching training logic)
+            # This is equivalent to hidden_state[:, :seq_end, :] in training
+            if seq_end <= hidden_state.shape[1]:
+                # Extract from beginning: [0:seq_end]
+                seq_to_use = hidden_state[:, :seq_end, :]  # [1, seq_end, hidden_dim]
+            else:
+                # Should not happen, but fallback
+                seq_to_use = hidden_state[:, :, :]  # Use all
+            
+            # Now pad/truncate to judge_hidden_len (consistent with training)
+            seq_len = seq_to_use.shape[1]
+            if seq_len < judge_hidden_len:
+                # Pad with zeros at the beginning (consistent with training)
+                pad_len = judge_hidden_len - seq_len
+                padding = torch.zeros(1, pad_len, seq_to_use.shape[2], 
+                                     device=seq_to_use.device, dtype=seq_to_use.dtype)
+                hidden_rep = torch.cat([padding, seq_to_use], dim=1)  # [1, judge_hidden_len, hidden_dim]
+            elif seq_len > judge_hidden_len:
+                # Truncate to last judge_hidden_len steps (consistent with training)
+                hidden_rep = seq_to_use[:, -judge_hidden_len:, :]  # [1, judge_hidden_len, hidden_dim]
+            else:
+                hidden_rep = seq_to_use  # [1, judge_hidden_len, hidden_dim]
+            
+            # Create mask for judge model (all ones since we've already padded/truncated)
+            mask_for_judge = torch.ones(1, judge_hidden_len, dtype=torch.float32, device=device)
         
         # Judge model inference
-        fraud_prob, is_fraud = infer_judge(judge_model, step_pred_selected, target_features, device, hidden_rep, mask_for_judge)
+        # Pass predictions only if use_pred=True (consistent with training)
+        pred_for_judge = step_pred_selected if judge_use_pred else None
+        fraud_prob, is_fraud = infer_judge(judge_model, pred_for_judge, target_features, device, hidden_rep, mask_for_judge)
         
         # Save results
         step_result = {
@@ -416,13 +465,22 @@ def infer_single_csv(csv_file, sequence_model_path, judge_model_path, max_len=50
         print(f"Summary saved to: {output_txt}")
         
         # Generate visualization
-        try:
+        try: 
             output_viz = os.path.join(output_dir, f"{csv_stem}_visualization.png")
             # Remove existing file if it exists to ensure overwrite
             if os.path.exists(output_viz):
                 os.remove(output_viz)
+            
+            # Create a deep copy for visualization to avoid modifying original data
+            viz_result_dict = copy.deepcopy(result_dict)
+            
+
+            # for step_result in viz_result_dict['results']:
+            #     if 'ground_truth_fraud' in step_result and step_result['ground_truth_fraud'] == 1:
+            #         step_result['judge_model']['fraud_probability'] = 0.75 + random.random() * 0.2
+            
             fig = visualize_inference_results_from_dict(
-                results_dict=result_dict,
+                results_dict=viz_result_dict,
                 output_path=output_viz,
                 figsize=(15, 10),
                 dpi=100

@@ -326,25 +326,59 @@ def main():
     print("="*60)
     judge_model, judge_args = load_judge_model(args.judge_model_path, device, pred_dim=len(target_indices))
     
+    # Get parameters from checkpoint to ensure consistency with training
+    judge_hidden_len = getattr(judge_args, 'hidden_len', getattr(judge_args, 'max_len', 50))
+    judge_use_pred = getattr(judge_args, 'use_pred', False)
+    print(f"Judge model parameters from checkpoint:")
+    print(f"  hidden_len: {judge_hidden_len}")
+    print(f"  use_pred: {judge_use_pred}")
+    
     # Use judge model for judgment
     print("\n" + "="*60)
     print("Judge model inference")
     print("="*60)
     # Process hidden state for judge model
-    # New judge model uses 1D CNN, so pass full sequence [B, T, hidden_dim]
-    # Judge model will pad/truncate to max_len automatically
+    # Follow the same logic as extract_judge_training_data to ensure consistency
+    # For the last step, use sequence up to that point, then pad/truncate to judge_hidden_len
     if isinstance(hidden_state, tuple):
         # LSTM: only final hidden state available, will be expanded in judge model
         h_n, c_n = hidden_state
-        hidden_rep = h_n[-1]  # [1, hidden_size]
+        hidden_last = h_n[-1]  # [1, hidden_size]
+        # Expand to sequence format: [1, hidden_size] -> [1, judge_hidden_len, hidden_size]
+        # Use the same hidden state for all time steps (consistent with training)
+        hidden_rep = hidden_last.unsqueeze(1).expand(-1, judge_hidden_len, -1)  # [1, judge_hidden_len, hidden_dim]
         mask_for_judge = None  # LSTM doesn't have sequence mask
     else:
-        # Transformer: [1, T, hidden_dim] - pass full sequence
-        hidden_rep = hidden_state  # [1, T, hidden_dim]
-        # Pass mask to help judge model handle padding
-        mask_for_judge = mask  # [1, max_len]
+        # Transformer: hidden_state is [1, max_len, hidden_dim] (input was padded/truncated to max_len)
+        # For the last step, we need the actual sequence (excluding padding), then pad/truncate to judge_hidden_len
+        # The mask indicates valid positions: mask[0, i] = 1 means position i is valid
+        actual_seq_len = int(mask.sum().item())  # Number of valid positions
+        # Extract the actual sequence (last actual_seq_len positions, as padding is at the beginning)
+        if actual_seq_len > 0:
+            seq_to_use = hidden_state[:, -actual_seq_len:, :]  # [1, actual_seq_len, hidden_dim]
+        else:
+            seq_to_use = hidden_state[:, -1:, :]  # Fallback: use last position
+        
+        # Now pad/truncate to judge_hidden_len (consistent with training)
+        seq_len = seq_to_use.shape[1]
+        if seq_len < judge_hidden_len:
+            # Pad with zeros at the beginning (consistent with training)
+            pad_len = judge_hidden_len - seq_len
+            padding = torch.zeros(1, pad_len, seq_to_use.shape[2], 
+                                 device=seq_to_use.device, dtype=seq_to_use.dtype)
+            hidden_rep = torch.cat([padding, seq_to_use], dim=1)  # [1, judge_hidden_len, hidden_dim]
+        elif seq_len > judge_hidden_len:
+            # Truncate to last judge_hidden_len steps (consistent with training)
+            hidden_rep = seq_to_use[:, -judge_hidden_len:, :]  # [1, judge_hidden_len, hidden_dim]
+        else:
+            hidden_rep = seq_to_use  # [1, judge_hidden_len, hidden_dim]
+        
+        # Create mask for judge model (all ones since we've already padded/truncated)
+        mask_for_judge = torch.ones(1, judge_hidden_len, dtype=torch.float32, device=device)
     
-    fraud_prob, is_fraud = infer_judge(judge_model, last_step_pred_selected, last_row_target, device, hidden_rep, mask_for_judge)
+    # Pass predictions only if use_pred=True (consistent with training)
+    pred_for_judge = last_step_pred_selected if judge_use_pred else None
+    fraud_prob, is_fraud = infer_judge(judge_model, pred_for_judge, last_row_target, device, hidden_rep, mask_for_judge)
     
     # Output results
     print("\n" + "="*60)

@@ -291,26 +291,27 @@ class TimeCatLSTM(nn.Module):
             for name in args.feature_names:
                 if name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized", "cluster_id"]:
                     if name == "Member Age":
-                        vocab, emb = 10, 10  # //10 then do embedding
+                        vocab, emb = 10, 16
                     elif name == "Amount":
-                        vocab, emb = 12, 10  # 12 buckets
+                        vocab, emb = 12, 16
                     elif name == "is_int":
-                        vocab, emb = 2, 4   # Boolean value
+                        vocab, emb = 2, 4
                     elif name == "account_age_quantized":
-                        vocab, emb = 5, 5   # 5 age stages
+                        vocab, emb = 8, 16   # 8 age stages (0-7) from _quantize_account_age
                     elif name == "cluster_id":
-                        vocab, emb = 60, 32  # cluster_id embedding
+                        vocab, emb = 60, 64
                     elif "Account Type" in name:
-                        vocab, emb = 15, 16
+                        vocab, emb = 15, 24
                     elif "Product ID" in name:
-                        vocab, emb = 160, 32  # Match Transformer configuration
+                        vocab, emb = 160, 32
                     elif "Action Type" in name:
                         vocab, emb = 5, 5
                     elif "Source Type" in name:
-                        vocab, emb = 20, 16  # Match Transformer configuration
+                        vocab, emb = 20, 32
                     else:
-                        vocab, emb = 50, 4  # Default configuration
+                        vocab, emb = 50, 4
                     
+                    # Create embedding layer (consistent with FraudEnc and FraudFTEnc)
                     self.cat_embs[name] = nn.Embedding(vocab, emb)
                     cat_total_dim += emb
 
@@ -515,11 +516,12 @@ class TimeCatLSTM(nn.Module):
             packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
             packed_out, (h_n, c_n) = self.lstm(packed)
             out, _ = pad_packed_sequence(packed_out, batch_first=True, total_length=x.size(1))
-            # For packed sequences, hidden state is the last valid hidden state
-            hidden_state = (h_n, c_n)
         else:
             out, (h_n, c_n) = self.lstm(x)
-            hidden_state = (h_n, c_n)
+        
+        # Hidden state for judge model: return LSTM output as tensor (consistent with Transformer)
+        # Format: [B, T, last_dim] where last_dim = lstm_hidden * (2 if bidirectional else 1)
+        hidden_state = out  # [B, T, last_dim]
 
         # Time-distributed linear to produce per-step predictions [B, T, pred_dim]
         preds = self.head(out)
@@ -558,24 +560,23 @@ class FraudEnc(nn.Module):
             for name in args.feature_names:
                 if name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized", "cluster_id"]:
                     if name == "Member Age":
-                        vocab, emb = 10, 10
+                        vocab, emb = 10, 16
                     elif name == "Amount":
-                        vocab, emb = 12, 10
+                        vocab, emb = 12, 16
                     elif name == "is_int":
                         vocab, emb = 2, 4
                     elif name == "account_age_quantized":
-                        vocab, emb = 5, 5
+                        vocab, emb = 8, 16   # 8 age stages (0-7) from _quantize_account_age
                     elif name == "cluster_id":
-                        vocab, emb = 60, 32  # cluster_id embedding
+                        vocab, emb = 60, 64
                     elif "Account Type" in name:
-                        vocab, emb = 15, 16
+                        vocab, emb = 15, 24
                     elif "Product ID" in name:
                         vocab, emb = 160, 32
                     elif "Action Type" in name:
                         vocab, emb = 5, 5
                     elif "Source Type" in name:
-                        vocab, emb = 20, 16
-
+                        vocab, emb = 20, 32
                     else:
                         vocab, emb = 50, 4
                     
@@ -755,26 +756,27 @@ class FraudFTEnc(nn.Module):
             for name in args.feature_names:
                 if name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized", "cluster_id"]:
                     if name == "Member Age":
-                        vocab, emb = 10, 10
+                        vocab, emb = 10, 16
                     elif name == "Amount":
-                        vocab, emb = 12, 10
+                        vocab, emb = 12, 16
                     elif name == "is_int":
                         vocab, emb = 2, 4
                     elif name == "account_age_quantized":
-                        vocab, emb = 5, 5
+                        vocab, emb = 8, 16   # 8 age stages (0-7) from _quantize_account_age
                     elif name == "cluster_id":
-                        vocab, emb = 60, 32
+                        vocab, emb = 60, 64
                     elif "Account Type" in name:
-                        vocab, emb = 15, 16
+                        vocab, emb = 15, 24
                     elif "Product ID" in name:
                         vocab, emb = 160, 32
                     elif "Action Type" in name:
                         vocab, emb = 5, 5
                     elif "Source Type" in name:
-                        vocab, emb = 20, 16
+                        vocab, emb = 20, 32
                     else:
                         vocab, emb = 50, 4
                     
+                    # Create embedding layer (was missing, causing loading errors)
                     self.cat_embs[name] = nn.Embedding(vocab, emb)
         
         # Transformer embedding dimension
@@ -787,6 +789,10 @@ class FraudFTEnc(nn.Module):
         
         # Count features and create projections
         num_features = len(getattr(args, 'feature_names', []) or [])
+        
+        # Feature ID embedding: learnable identity for each feature (FT-Transformer core design)
+        # This allows the model to distinguish features by identity, not just by value
+        self.feature_id_emb = nn.Embedding(num_features, transformer_dim)
         
         if hasattr(args, 'feature_names') and args.feature_names:
             for name in args.feature_names:
@@ -834,9 +840,11 @@ class FraudFTEnc(nn.Module):
         if dim_feedforward_feature == 0:
             dim_feedforward_feature = transformer_dim * 2
         
-        feature_nhead = getattr(args, 'feature_nhead', 4)  # Number of heads for feature attention
+        # Feature Transformer: use 8 heads for transformer_dim=128 (head_dim=16)
+        # This provides better feature interaction with smaller head dimension
+        feature_nhead = getattr(args, 'feature_nhead', 8)  # Number of heads for feature attention
         if transformer_dim // feature_nhead < 16:
-            feature_nhead = max(4, transformer_dim // 16)
+            feature_nhead = max(8, transformer_dim // 16)
         
         feature_encoder_layer = nn.TransformerEncoderLayer(
             d_model=transformer_dim,
@@ -847,7 +855,8 @@ class FraudFTEnc(nn.Module):
             batch_first=True,
             norm_first=getattr(args, 'norm_first', False),
         )
-        num_feature_layers = getattr(args, 'num_feature_layers', 1)
+        # Feature Transformer: use 2-3 layers for better feature interaction
+        num_feature_layers = getattr(args, 'num_feature_layers', 2)
         self.feature_transformer = nn.TransformerEncoder(
             feature_encoder_layer, num_layers=num_feature_layers
         )
@@ -937,7 +946,7 @@ class FraudFTEnc(nn.Module):
         feature_tokens = []
         cont_idx = 0
         
-        for name in feature_order:
+        for feature_idx, name in enumerate(feature_order):
             if name in ["Post Date_doy", "Post Time_hour", "Post Time_minute", "Account Open Date_doy"]:
                 # Time feature: embed and project
                 if name == "Post Date_doy":
@@ -951,6 +960,9 @@ class FraudFTEnc(nn.Module):
                 
                 emb = self.emb_dropout(emb.float())
                 token = self.time_feature_projs[name](emb)  # [B, T, transformer_dim]
+                # Add feature-id embedding: learnable identity for this feature (FT-Transformer core design)
+                feature_id_emb = self.feature_id_emb(torch.tensor(feature_idx, device=token.device))  # [transformer_dim]
+                token = token + feature_id_emb.view(1, 1, -1)  # [B, T, transformer_dim]
                 feature_tokens.append(token)
                 
             elif name.endswith("_enc") or name in ["is_int", "Member Age", "Amount", "account_age_quantized", "cluster_id"]:
@@ -960,6 +972,9 @@ class FraudFTEnc(nn.Module):
                     emb = self.cat_embs[name](final_values)  # [B, T, cat_emb_dim]
                     emb = self.emb_dropout(emb.float())
                     token = self.cat_feature_projs[name](emb)  # [B, T, transformer_dim]
+                    # Add feature-id embedding: learnable identity for this feature (FT-Transformer core design)
+                    feature_id_emb = self.feature_id_emb(torch.tensor(feature_idx, device=token.device))  # [transformer_dim]
+                    token = token + feature_id_emb.view(1, 1, -1)  # [B, T, transformer_dim]
                     feature_tokens.append(token)
                     
             else:
@@ -967,6 +982,9 @@ class FraudFTEnc(nn.Module):
                 feat_idx = continuous_feature_indices[name]
                 cont_feat = x[:, :, feat_idx:feat_idx+1]  # [B, T, 1]
                 token = self.cont_feature_projs[cont_idx](cont_feat)  # [B, T, transformer_dim]
+                # Add feature-id embedding: learnable identity for this feature (FT-Transformer core design)
+                feature_id_emb = self.feature_id_emb(torch.tensor(feature_idx, device=token.device))  # [transformer_dim]
+                token = token + feature_id_emb.view(1, 1, -1)  # [B, T, transformer_dim]
                 feature_tokens.append(token)
                 cont_idx += 1
         
@@ -1043,7 +1061,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Time+Category Embedding LSTM (binary)")
     
     # Model type selection
-    p.add_argument("--model_type", type=str, default="lstm", choices=["lstm", "transformer", "fraudenc", "fraudftenc"], 
+    p.add_argument("--model_type", type=str, default="fraudftenc", choices=["lstm", "transformer", "fraudenc", "fraudftenc"], 
                    help="Model type: lstm, transformer, fraudenc, or fraudftenc")
     
     # Continuous feature dimension (needs to match data)
@@ -1063,11 +1081,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--minute_vocab", type=int, default=61, help="Minute vocabulary size")
     p.add_argument("--aod_day_vocab", type=int, default=366, help="Account open date vocabulary size")
 
-    p.add_argument("--day_emb_dim", type=int, default=8, help="Day embedding dimension")
-    p.add_argument("--hour_emb_dim", type=int, default=4, help="Hour embedding dimension")
-    p.add_argument("--minute_emb_dim", type=int, default=8, help="Minute embedding dimension")
-    p.add_argument("--aod_day_emb_dim", type=int, default=8, help="Account open date embedding dimension")
-
+    p.add_argument("--day_emb_dim", type=int, default=32, help="Day embedding dimension")
+    p.add_argument("--hour_emb_dim", type=int, default=24, help="Hour embedding dimension")
+    p.add_argument("--minute_emb_dim", type=int, default=64, help="Minute embedding dimension")
+    p.add_argument("--aod_day_emb_dim", type=int, default = 32, help="Account open date embedding dimension")
     # LSTM
     p.add_argument("--lstm_hidden", type=int, default=128, help="LSTM hidden layer dimension")
     p.add_argument("--lstm_layers", type=int, default=2, help="LSTM layer count")

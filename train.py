@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 import csv
 import json
 
-from src.models.backbone_model import TimeCatLSTM, build_arg_parser, build_seq_model
+from src.models.backbone_model import build_arg_parser, build_seq_model
 from src.models.loss import build_loss_from_args
 from src.models.datasets import create_dataloader
 
@@ -666,13 +666,13 @@ def main():
     # Data related parameters
     parser.add_argument("--data_dir", type=str, default="data/final/no_fraud", help="Data directory")
     parser.add_argument("--max_len", type=int, default=50, help="Maximum sequence length")
-    parser.add_argument("--batch_size", type=int, default=48, help="Batch size")
-    parser.add_argument("--train_ratio", type=float, default=0.85, help="Training set ratio")
-    parser.add_argument("--val_ratio", type=float, default=0.1, help="Validation set ratio")
-    parser.add_argument("--test_ratio", type=float, default=0.05, help="Test set ratio")
+    parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
+    parser.add_argument("--train_ratio", type=float, default=0.9, help="Training set ratio")
+    parser.add_argument("--val_ratio", type=float, default=0.08, help="Validation set ratio")
+    parser.add_argument("--test_ratio", type=float, default=0.02, help="Test set ratio")
     
     # Training related parameters
-    parser.add_argument("--epochs", type=int, default=30, help="Number of training epochs")
+    parser.add_argument("--epochs", type=int, default=60, help="Number of training epochs")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay")
     parser.add_argument("--patience", type=int, default=5, help="Learning rate scheduler patience")
@@ -680,7 +680,7 @@ def main():
     parser.add_argument("--use_amp", action="store_true", help="Use mixed precision training (AMP)")
     
     # Loss options
-    parser.add_argument("--loss_type", type=str, default="mse", choices=["mse", "mae", "bce", "huber", "pseudohuber", "quantile"], help="Choose loss function")
+    parser.add_argument("--loss_type", type=str, default="mae", choices=["mse", "mae", "bce", "huber", "pseudohuber", "quantile"], help="Choose loss function")
     parser.add_argument("--delta", type=float, default=10, help="Huber/Pseudo-Huber delta (δ)")
     parser.add_argument("--auto_delta_p", type=float, default=0.9, help="Auto delta: p-quantile of residual |e|, e.g., 0.9")
     parser.add_argument("--quantiles", type=str, default="0.1,0.5,0.9", help="Quantile list, comma-separated")
