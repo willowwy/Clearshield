@@ -460,12 +460,13 @@ def train_judge_model(judge_model, train_data, val_data, device, args, test_data
         if val_pr_auc > best_val_pr_auc:
             best_val_pr_auc = val_pr_auc
             # Save best model
+            os.makedirs(args.checkpoint_dir, exist_ok=True)
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': judge_model.state_dict(),
                 'val_pr_auc': val_pr_auc,
                 'args': args
-            }, f'checkpoints-ftenc/best_judge_model.pth')
+            }, os.path.join(args.checkpoint_dir, 'best_judge_model.pth'))
         
         if epoch % 10 == 0:
             current_lr = trainer.get_lr()
@@ -729,6 +730,8 @@ def main():
                        help="Random seed")
     parser.add_argument("--save_dir", type=str, default="judge_results",
                        help="Results save directory")
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints-ftenc",
+                       help="Directory to save judge model checkpoints")
     parser.add_argument("--no-stat", action="store_true",
                        help="Train judge model without statistical features (only predictions, targets, and errors)")
     parser.add_argument("--stat-only", action="store_true",
@@ -756,7 +759,7 @@ def main():
     
     # Create save directory
     os.makedirs(args.save_dir, exist_ok=True)
-    os.makedirs('checkpoints', exist_ok=True)
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
     
     # Load trained sequence model
     sequence_model, model_args = load_seq_model(args.sequence_model_path, device)

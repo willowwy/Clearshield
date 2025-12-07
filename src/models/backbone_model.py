@@ -310,6 +310,10 @@ class TimeCatLSTM(nn.Module):
                         vocab, emb = 20, 32
                     else:
                         vocab, emb = 50, 4
+                    
+                    # Create embedding layer (consistent with FraudEnc and FraudFTEnc)
+                    self.cat_embs[name] = nn.Embedding(vocab, emb)
+                    cat_total_dim += emb
 
         # Total input dimension after embeddings (for consistency with Transformer)
         self.input_dim = time_total_dim + cat_total_dim + args.cont_dim
@@ -512,11 +516,12 @@ class TimeCatLSTM(nn.Module):
             packed = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
             packed_out, (h_n, c_n) = self.lstm(packed)
             out, _ = pad_packed_sequence(packed_out, batch_first=True, total_length=x.size(1))
-            # For packed sequences, hidden state is the last valid hidden state
-            hidden_state = (h_n, c_n)
         else:
             out, (h_n, c_n) = self.lstm(x)
-            hidden_state = (h_n, c_n)
+        
+        # Hidden state for judge model: return LSTM output as tensor (consistent with Transformer)
+        # Format: [B, T, last_dim] where last_dim = lstm_hidden * (2 if bidirectional else 1)
+        hidden_state = out  # [B, T, last_dim]
 
         # Time-distributed linear to produce per-step predictions [B, T, pred_dim]
         preds = self.head(out)
