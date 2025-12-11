@@ -119,51 +119,26 @@ def prepare_sequence_data(df, max_len, feature_names):
 
 def prepare_single_step_data(X_seq, t, max_len):
     """
-    Prepare input data for time step t (using ground truth sequence)
+    Prepare input data for time step t using the *real* prefix sequence.
     
-    Args:
-        X_seq: [T_total, feature_dim] Complete sequence
-        t: Target time step (predict t+1, use [0:t+1] as input)
-        max_len: Maximum sequence length
-    
-    Returns:
-        X: [1, max_len, feature_dim] Input tensor
-        mask: [1, max_len] Mask tensor
+    Training时的hidden序列来自真实长度序列（先截到t+1，再pad/truncate到max_len）。
+    推理保持一致：先取真实序列，再根据max_len做右截断（不做左padding进入Transformer）。
     """
-    # To predict t+1, use [0:t+1] as input (t+1 time steps in total)
-    # The model will output t+1 predictions, the last one corresponds to t+1
     if t + 1 >= len(X_seq):
         raise ValueError(f"Time step {t} exceeds sequence length {len(X_seq)}")
-    
-    # Input sequence: use [0:t+1] (t+1 time steps in total)
-    # The model will output t+1 predictions, the last one (predictions[0, -1, :]) corresponds to t+1 prediction
-    input_seq = X_seq[:t+1]  # [t+1, feature_dim]
-    
-    # Process sequence: pad or truncate to max_len
+
+    # 真实前缀 [0 : t+1]
+    input_seq = X_seq[: t + 1]
+
+    # 训练时如果长度超过max_len，会截取末尾max_len；这里直接对真实序列做同样截断
+    if len(input_seq) > max_len:
+        input_seq = input_seq[-max_len:]
+
+    # 构造无左padding的输入与mask（全部为1，长度为真实长度或max_len后的截断长度）
     seq_len = len(input_seq)
-    if seq_len < max_len:
-        # Left padding
-        pad_len = max_len - seq_len
-        X_padded = np.vstack([
-            np.zeros((pad_len, input_seq.shape[1]), dtype=np.float32),
-            input_seq.astype(np.float32)
-        ])
-        mask = np.hstack([
-            np.zeros(pad_len, dtype=np.float32),
-            np.ones(seq_len, dtype=np.float32)
-        ])
-    elif seq_len > max_len:
-        # Truncate to max_len (take last max_len rows)
-        X_padded = input_seq[-max_len:].astype(np.float32)
-        mask = np.ones(max_len, dtype=np.float32)
-    else:
-        X_padded = input_seq.astype(np.float32)
-        mask = np.ones(max_len, dtype=np.float32)
-    
-    # Convert to tensor and add batch dimension
-    X = torch.tensor(X_padded, dtype=torch.float32).unsqueeze(0)  # [1, max_len, feature_dim]
-    mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)  # [1, max_len]
-    
+    X = torch.tensor(input_seq.astype(np.float32)).unsqueeze(0)  # [1, seq_len, feature_dim]
+    mask = torch.ones(1, seq_len, dtype=torch.float32)  # [1, seq_len]
+
     return X, mask
 
 
@@ -328,45 +303,25 @@ def infer_single_csv(csv_file, sequence_model_path, judge_model_path, max_len=50
             hidden_rep = hidden_last.unsqueeze(1).expand(-1, judge_hidden_len, -1)  # [1, judge_hidden_len, hidden_dim]
             mask_for_judge = None  # LSTM doesn't have sequence mask
         else:
-            # Transformer: hidden_state is [1, max_len, hidden_dim]
-            # Training logic: use hidden_state[:, :t+1, :] for time step t
-            # In inference, we input [0:t+1] padded to max_len, so:
-            # - If t+1 <= max_len: hidden_state[:, :t+1, :] is the actual sequence (but may be padded)
-            # - If t+1 > max_len: hidden_state is already truncated to max_len
-            # 
-            # Key: We need to extract the sequence from BEGINNING, matching training logic
-            # The actual sequence length is t+1 (or max_len if truncated)
-            actual_seq_len = int(mask.sum().item())  # Number of valid positions (t+1 or max_len)
-            original_seq_len = t + 1  # Original sequence length before padding/truncation
-            
-            # Extract sequence from beginning, matching training: hidden_state[:, :seq_end, :]
-            # where seq_end = min(t+1, max_len) in training
-            seq_end = min(original_seq_len, hidden_state.shape[1])
-            
-            # Use the sequence from beginning to seq_end (matching training logic)
-            # This is equivalent to hidden_state[:, :seq_end, :] in training
-            if seq_end <= hidden_state.shape[1]:
-                # Extract from beginning: [0:seq_end]
-                seq_to_use = hidden_state[:, :seq_end, :]  # [1, seq_end, hidden_dim]
-            else:
-                # Should not happen, but fallback
-                seq_to_use = hidden_state[:, :, :]  # Use all
-            
-            # Now pad/truncate to judge_hidden_len (consistent with training)
+            # Transformer: hidden_state now对应真实序列长度（无前置padding）
+            # 训练逻辑：取开头到t+1的hidden，再pad/truncate到judge_hidden_len
+            full_hidden_seq = hidden_state  # [1, seq_len, hidden_dim], seq_len为真实长度或截到max_len后的长度
+            seq_end = min(t + 1, full_hidden_seq.shape[1])
+            seq_to_use = full_hidden_seq[:, :seq_end, :]  # [1, seq_end, hidden_dim]
+
+            # Pad/截断到judge_hidden_len，保持训练一致（左侧padding，超长取末尾）
             seq_len = seq_to_use.shape[1]
             if seq_len < judge_hidden_len:
-                # Pad with zeros at the beginning (consistent with training)
                 pad_len = judge_hidden_len - seq_len
-                padding = torch.zeros(1, pad_len, seq_to_use.shape[2], 
-                                     device=seq_to_use.device, dtype=seq_to_use.dtype)
+                padding = torch.zeros(1, pad_len, seq_to_use.shape[2],
+                                      device=seq_to_use.device, dtype=seq_to_use.dtype)
                 hidden_rep = torch.cat([padding, seq_to_use], dim=1)  # [1, judge_hidden_len, hidden_dim]
             elif seq_len > judge_hidden_len:
-                # Truncate to last judge_hidden_len steps (consistent with training)
-                hidden_rep = seq_to_use[:, -judge_hidden_len:, :]  # [1, judge_hidden_len, hidden_dim]
+                hidden_rep = seq_to_use[:, -judge_hidden_len:, :]  # 取末尾judge_hidden_len
             else:
-                hidden_rep = seq_to_use  # [1, judge_hidden_len, hidden_dim]
-            
-            # Create mask for judge model (all ones since we've already padded/truncated)
+                hidden_rep = seq_to_use
+
+            # Judge mask：全1（已完成pad/truncate）
             mask_for_judge = torch.ones(1, judge_hidden_len, dtype=torch.float32, device=device)
         
         # Judge model inference

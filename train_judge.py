@@ -204,29 +204,19 @@ def extract_judge_training_data(sequence_model, dataloader, device, feature_name
 
 def filter_fraud_batches(dataloader, min_fraud_rate=0.02, mix_factor: float = 0.0, seed: int = 42):
     """
-    Filter dataloader to only keep batches with fraud samples
+    Filter dataloader to select batches containing fraud samples, and optionally mix in a certain ratio of non-fraud batches.
     
     Args:
-        dataloader: Original dataloader
-        min_fraud_rate: Minimum fraud rate to keep batch
+        dataloader: Original dataloader (contains all batches)
+        min_fraud_rate: Minimum fraud rate to consider a batch as "containing fraud"
+        mix_factor: Ratio of non-fraud to fraud batches.
+            - 0.0: Only use batches with fraud (original behavior)
+            - 1.0: Non-fraud and fraud batches have roughly the same count
+            - 0.5: Non-fraud count is approximately half of fraud count
+        seed: Random seed (for sampling from non-fraud candidates)
     
     Returns:
-        Filtered batches as list of tuples
-    """
-    """
-    从 dataloader 中选择包含 fraud 的 batch，并按需要混入一定比例的 non-fraud batch。
-    
-    Args:
-        dataloader: 原始 dataloader（包含所有 batch）
-        min_fraud_rate: 认为是“有 fraud” batch 的最小 fraud 比例
-        mix_factor: non-fraud : fraud 的 batch 比例。
-            - 0.0: 只使用有 fraud 的 batch（原始行为）
-            - 1.0: non-fraud 与 fraud batch 数量大致相同
-            - 0.5: non-fraud 数量约为 fraud 的一半
-        seed: 随机种子（用于从 non-fraud 候选中采样）
-    
-    Returns:
-        选择后的 batch 列表（包含 fraud 和按比例混入的 non-fraud）
+        Selected batch list (containing fraud and proportionally mixed non-fraud batches)
     """
     fraud_batches = []
     non_fraud_candidates = []
@@ -243,7 +233,7 @@ def filter_fraud_batches(dataloader, min_fraud_rate=0.02, mix_factor: float = 0.
             if fraud_rate >= min_fraud_rate:
                 fraud_batches.append((X, y, mask))
             else:
-                # 作为 non-fraud 候选 batch，后续按 mix_factor 采样
+                # Add as non-fraud candidate batch, will be sampled later according to mix_factor
                 non_fraud_candidates.append((X, y, mask))
     
     print(f"Found {len(fraud_batches)} batches with fraud rate >= {min_fraud_rate}")
@@ -252,7 +242,7 @@ def filter_fraud_batches(dataloader, min_fraud_rate=0.02, mix_factor: float = 0.
     if mix_factor > 0.0 and len(fraud_batches) > 0 and len(non_fraud_candidates) > 0:
         rng = np.random.RandomState(seed)
         n_fraud = len(fraud_batches)
-        # 目标 non-fraud 数量
+        # Target number of non-fraud batches
         target_non_fraud = int(n_fraud * mix_factor)
         target_non_fraud = max(1, target_non_fraud) if target_non_fraud > 0 else 0
         target_non_fraud = min(target_non_fraud, len(non_fraud_candidates))
@@ -488,7 +478,94 @@ def train_judge_model(judge_model, train_data, val_data, device, args, test_data
 
 
 
-def evaluate_judge_model(judge_model, test_data, device, hist_path=None):
+def plot_precision_recall_vs_threshold(y_true, y_scores, save_path, num_thresholds=100):
+    """
+    Plot precision and recall curves as a function of classification threshold.
+    
+    Args:
+        y_true: Ground truth binary labels (numpy array)
+        y_scores: Predicted positive class probabilities (numpy array)
+        save_path: Path to save the plot
+        num_thresholds: Number of threshold points to evaluate
+    """
+    from sklearn.metrics import precision_recall_curve
+    
+    # Calculate precision and recall for different thresholds
+    precision, recall, thresholds = precision_recall_curve(y_true, y_scores)
+    
+    # Also calculate precision and recall manually for more threshold points
+    # to get smoother curves
+    threshold_range = np.linspace(0.0, 1.0, num_thresholds)
+    precisions = []
+    recalls = []
+    
+    for threshold in threshold_range:
+        y_pred = (y_scores >= threshold).astype(int)
+        if y_pred.sum() > 0:  # At least one positive prediction
+            tp = ((y_true == 1) & (y_pred == 1)).sum()
+            fp = ((y_true == 0) & (y_pred == 1)).sum()
+            fn = ((y_true == 1) & (y_pred == 0)).sum()
+            
+            prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        else:
+            prec = 1.0  # No positive predictions, precision is undefined, set to 1
+            rec = 0.0   # No positive predictions, recall is 0
+        
+        precisions.append(prec)
+        recalls.append(rec)
+    
+    # Create the plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Left plot: Precision and Recall vs Threshold
+    ax1.plot(threshold_range, precisions, label='Precision', linewidth=2, color='blue')
+    ax1.plot(threshold_range, recalls, label='Recall', linewidth=2, color='red')
+    ax1.set_xlabel('Threshold', fontsize=12)
+    ax1.set_ylabel('Score', fontsize=12)
+    ax1.set_title('Precision and Recall vs Classification Threshold', fontsize=13)
+    ax1.legend(loc='best', fontsize=11)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xlim([0.0, 1.0])
+    ax1.set_ylim([0.0, 1.05])
+    
+    # Right plot: Precision vs Recall (PR Curve)
+    ax2.plot(recall, precision, linewidth=2, color='green')
+    ax2.set_xlabel('Recall', fontsize=12)
+    ax2.set_ylabel('Precision', fontsize=12)
+    ax2.set_title('Precision-Recall Curve', fontsize=13)
+    ax2.grid(True, alpha=0.3)
+    ax2.set_xlim([0.0, 1.05])
+    ax2.set_ylim([0.0, 1.05])
+    
+    # Add some key threshold points on the left plot
+    # Find threshold that maximizes F1 score
+    f1_scores = 2 * (np.array(precisions) * np.array(recalls)) / (np.array(precisions) + np.array(recalls) + 1e-10)
+    best_f1_idx = np.argmax(f1_scores)
+    best_threshold = threshold_range[best_f1_idx]
+    best_precision = precisions[best_f1_idx]
+    best_recall = recalls[best_f1_idx]
+    
+    # Mark the best F1 threshold point
+    ax1.axvline(x=best_threshold, color='gray', linestyle='--', alpha=0.7, linewidth=1)
+    ax1.plot(best_threshold, best_precision, 'bo', markersize=8, label=f'Best F1 (th={best_threshold:.3f})')
+    ax1.plot(best_threshold, best_recall, 'ro', markersize=8)
+    
+    # Add text annotation
+    ax1.text(best_threshold + 0.02, best_precision, f'P={best_precision:.3f}', 
+             fontsize=9, verticalalignment='bottom')
+    ax1.text(best_threshold + 0.02, best_recall, f'R={best_recall:.3f}', 
+             fontsize=9, verticalalignment='top')
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Precision-Recall vs Threshold plot saved to: {save_path}")
+    print(f"  Best F1 threshold: {best_threshold:.4f} (Precision={best_precision:.4f}, Recall={best_recall:.4f})")
+
+
+def evaluate_judge_model(judge_model, test_data, device, hist_path=None, plot_threshold_curve=False):
     """Evaluate the judge model"""
     test_pred, test_target, test_hidden, test_labels = test_data
     
@@ -594,6 +671,19 @@ def evaluate_judge_model(judge_model, test_data, device, hist_path=None):
             plt.close()
             
             print(f"Probability histograms saved to:\n  Normal: {normal_path}\n  Fraud:  {fraud_path}")
+        
+        # Plot precision-recall vs threshold curve if requested (for test mode)
+        if plot_threshold_curve:
+            if hist_path is not None:
+                base_dir = os.path.dirname(hist_path)
+                threshold_curve_path = os.path.join(base_dir, 'judge_test_precision_recall_vs_threshold.png')
+            else:
+                threshold_curve_path = 'judge_test_precision_recall_vs_threshold.png'
+            
+            y_true_np = test_labels.cpu().numpy()
+            y_scores_np = positive_probs.cpu().numpy()
+            
+            plot_precision_recall_vs_threshold(y_true_np, y_scores_np, threshold_curve_path)
         
         return {
             'accuracy': accuracy,
@@ -804,7 +894,7 @@ def main():
     print(f"Target features: {resolved_target_names}")
     print(f"Target indices: {target_indices}")
     
-    # Filter batches with fraud samples（可选混入部分 non-fraud batches）
+    # Filter batches with fraud samples (optionally mix in some non-fraud batches)
     fraud_batches = filter_fraud_batches(
         dataloader,
         min_fraud_rate=args.min_fraud_rate,
@@ -855,11 +945,11 @@ def main():
         print("No valid training data extracted!")
         return
     
-    # 如果是 test_only 模式，直接使用所有提取的数据作为 test 集，不进行二次划分
-    # 这样可以保持数据的原始顺序，并且避免不必要的随机划分
+    # If in test_only mode, directly use all extracted data as test set without secondary splitting
+    # This preserves the original data order and avoids unnecessary random splitting
     if test_only:
-        # 直接创建 test split，不进行随机划分
-        # 创建空的 train 和 val split，保持与 create_judge_dataset 返回格式一致
+        # Directly create test split without random splitting
+        # Create empty train and val splits to maintain consistency with create_judge_dataset return format
         if len(hidden_states.shape) > 1:
             empty_hidden = np.empty((0, *hidden_states.shape[1:]), dtype=hidden_states.dtype)
         else:
@@ -1018,7 +1108,11 @@ def main():
         
         print("\nTesting judge model...")
         hist_path = os.path.join(args.save_dir, 'judge_test_prob_hist.png')
-        test_results = evaluate_judge_model(judge_model, dataset_splits['test'], device, hist_path=hist_path)
+        # Enable threshold curve plotting in test mode
+        test_results = evaluate_judge_model(
+            judge_model, dataset_splits['test'], device, 
+            hist_path=hist_path, plot_threshold_curve=True
+        )
         
         # Save test results
         results = {
