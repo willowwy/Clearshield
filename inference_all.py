@@ -120,21 +120,21 @@ def prepare_sequence_data(df, max_len, feature_names):
 def prepare_single_step_data(X_seq, t, max_len):
     """
     Prepare input data for time step t using the *real* prefix sequence.
-    
-    Training时的hidden序列来自真实长度序列（先截到t+1，再pad/truncate到max_len）。
-    推理保持一致：先取真实序列，再根据max_len做右截断（不做左padding进入Transformer）。
+
+    During training, the hidden sequence comes from the real-length sequence (first truncate to t+1, then pad/truncate to max_len).
+    Inference maintains consistency: first take the real sequence, then right-truncate based on max_len (no left padding into Transformer).
     """
     if t + 1 >= len(X_seq):
         raise ValueError(f"Time step {t} exceeds sequence length {len(X_seq)}")
 
-    # 真实前缀 [0 : t+1]
+    # Real prefix [0 : t+1]
     input_seq = X_seq[: t + 1]
 
-    # 训练时如果长度超过max_len，会截取末尾max_len；这里直接对真实序列做同样截断
+    # During training, if length exceeds max_len, truncate to the last max_len; apply same truncation to real sequence here
     if len(input_seq) > max_len:
         input_seq = input_seq[-max_len:]
 
-    # 构造无左padding的输入与mask（全部为1，长度为真实长度或max_len后的截断长度）
+    # Construct input and mask without left padding (all 1s, length is real length or truncated length after max_len)
     seq_len = len(input_seq)
     X = torch.tensor(input_seq.astype(np.float32)).unsqueeze(0)  # [1, seq_len, feature_dim]
     mask = torch.ones(1, seq_len, dtype=torch.float32)  # [1, seq_len]
@@ -303,13 +303,13 @@ def infer_single_csv(csv_file, sequence_model_path, judge_model_path, max_len=50
             hidden_rep = hidden_last.unsqueeze(1).expand(-1, judge_hidden_len, -1)  # [1, judge_hidden_len, hidden_dim]
             mask_for_judge = None  # LSTM doesn't have sequence mask
         else:
-            # Transformer: hidden_state now对应真实序列长度（无前置padding）
-            # 训练逻辑：取开头到t+1的hidden，再pad/truncate到judge_hidden_len
-            full_hidden_seq = hidden_state  # [1, seq_len, hidden_dim], seq_len为真实长度或截到max_len后的长度
+            # Transformer: hidden_state now corresponds to real sequence length (no prefix padding)
+            # Training logic: take hidden from start to t+1, then pad/truncate to judge_hidden_len
+            full_hidden_seq = hidden_state  # [1, seq_len, hidden_dim], seq_len is real length or truncated length after max_len
             seq_end = min(t + 1, full_hidden_seq.shape[1])
             seq_to_use = full_hidden_seq[:, :seq_end, :]  # [1, seq_end, hidden_dim]
 
-            # Pad/截断到judge_hidden_len，保持训练一致（左侧padding，超长取末尾）
+            # Pad/truncate to judge_hidden_len, maintain training consistency (left padding, take last for excess)
             seq_len = seq_to_use.shape[1]
             if seq_len < judge_hidden_len:
                 pad_len = judge_hidden_len - seq_len
@@ -317,11 +317,11 @@ def infer_single_csv(csv_file, sequence_model_path, judge_model_path, max_len=50
                                       device=seq_to_use.device, dtype=seq_to_use.dtype)
                 hidden_rep = torch.cat([padding, seq_to_use], dim=1)  # [1, judge_hidden_len, hidden_dim]
             elif seq_len > judge_hidden_len:
-                hidden_rep = seq_to_use[:, -judge_hidden_len:, :]  # 取末尾judge_hidden_len
+                hidden_rep = seq_to_use[:, -judge_hidden_len:, :]  # Take last judge_hidden_len
             else:
                 hidden_rep = seq_to_use
 
-            # Judge mask：全1（已完成pad/truncate）
+            # Judge mask: all 1s (pad/truncate already completed)
             mask_for_judge = torch.ones(1, judge_hidden_len, dtype=torch.float32, device=device)
         
         # Judge model inference

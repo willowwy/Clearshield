@@ -86,7 +86,7 @@ class HuberLoss(nn.Module):
         *,
         pseudo=False,
         reduction="mean",
-        apply_sigmoid=False,        # 默认关闭！
+        apply_sigmoid=False,        # Disabled by default!
         auto_delta_p=None,
         column_weights=None,
     ):

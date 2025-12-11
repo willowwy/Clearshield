@@ -43,7 +43,7 @@ GLOBAL_K_MIN, GLOBAL_K_MAX, GLOBAL_K_STEP = 10, 60, 10
 MEMMAP_EMB  = "/home/ubuntu/embeddings.mmap"
 MEMMAP_20D  = "/home/ubuntu/embeddings_20d.mmap"
 INDEX_JSON  = "/home/ubuntu/global_index.json"
-MODEL_PKL   = "/home/ubuntu/global_cluster_model.pkl"  # 新增：模型输出路径
+MODEL_PKL   = "/home/ubuntu/global_cluster_model.pkl"  # New: model output path
 
 def device():
     if torch.cuda.is_available(): return "cuda"
